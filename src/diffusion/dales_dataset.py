@@ -85,7 +85,7 @@ class DALESDataset:
             w = self.RARE_WEIGHT_MULTIPLIER if tile_id in rare_tiles else 1.0
 
             # glob for crops belonging to this tile
-            crop_dirs = sorted(self.gt_root.glob(f"{tile_id}_x*_y*/"))
+            crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
             for d in crop_dirs:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
@@ -112,14 +112,14 @@ class DALESDataset:
             obj = DiffusionTensor(obj.grid, obj.data)
         return DiffusionTensor(obj.grid.to(device), obj.data.to(device))
 
-    def load_crop_level0(self, crop_id: str, device: str = "cuda") -> DiffusionTensor:
+    def load_crop_level0(self, split: str, crop_id: str, device: str = "cuda") -> DiffusionTensor:
         """Level 0: coarsest-resolution DiffusionTensor → dense."""
         res = self.base_resolution
-        X0 = self._load_dt(self.gt_root / crop_id / f"{res}.pt", device)
+        X0 = self._load_dt(self.gt_root / split / crop_id / f"{res}.pt", device)
         return X0.to_custom_dense()
 
     def load_crop_levelN(
-        self, crop_id: str, level: int, device: str = "cuda"
+        self, split: str, crop_id: str, level: int, device: str = "cuda"
     ) -> Tuple[DiffusionTensor, DiffusionTensor, DiffusionTensor]:
         """
         Level N>0: load coarse + fine, return (X, X_UP, X0_filled).
@@ -127,8 +127,8 @@ class DALESDataset:
         """
         res_1 = self.base_resolution * (self.upsample_fac ** (level - 1))
         res_2 = self.upsample_fac * res_1
-        X  = self._load_dt(self.gt_root / crop_id / f"{res_1}.pt", device)
-        X0 = self._load_dt(self.gt_root / crop_id / f"{res_2}.pt", device)
+        X  = self._load_dt(self.gt_root / split / crop_id / f"{res_1}.pt", device)
+        X0 = self._load_dt(self.gt_root / split / crop_id / f"{res_2}.pt", device)
         X_UP = X.trilinear_upsample(self.upsample_fac)
         X0   = DiffusionTensor.fill_upsampled_with_gt(X_UP, X0)
         return X, X_UP, X0
@@ -139,6 +139,7 @@ class DALESDataset:
 
     def sample_batch(
         self,
+        split: str,
         level: int,
         batch_size: int,
         device: str = "cuda",
@@ -156,12 +157,12 @@ class DALESDataset:
         crop_ids = self.sample_crop_ids(batch_size)
 
         if level == 0:
-            tensors = [self.load_crop_level0(c, device) for c in crop_ids]
+            tensors = [self.load_crop_level0(split, c, device) for c in crop_ids]
             return _jcat_dt(tensors)
 
         X_list, XUP_list, X0_list = [], [], []
         for c in crop_ids:
-            X, X_UP, X0 = self.load_crop_levelN(c, level, device)
+            X, X_UP, X0 = self.load_crop_levelN(split, c, level, device)
             X_list.append(X)
             XUP_list.append(X_UP)
             X0_list.append(X0)
@@ -180,6 +181,7 @@ class DALESDataset:
     def compute_val_loss(
         self,
         diffusion,
+        split: str,
         level: int,
         n_crops: int = 4,
         clip_size: int = 20,
@@ -193,11 +195,11 @@ class DALESDataset:
         for crop_id in sample_ids:
             try:
                 if level == 0:
-                    X0 = self.load_crop_level0(crop_id, device)
+                    X0 = self.load_crop_level0(split, crop_id, device)
                     with torch.no_grad():
                         loss = diffusion(X0).item()
                 else:
-                    X, X_UP, X0 = self.load_crop_levelN(crop_id, level, device)
+                    X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
                     with torch.no_grad():
                         X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
                         X0_BLUR.grid = X0.grid

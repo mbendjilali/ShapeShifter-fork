@@ -29,7 +29,7 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
                            base_resolution=cfg["base_resolution"])
 
     # Sample one batch to determine channel count
-    X, X_UP, Y = dataset.sample_batch(args.level, 1, device)
+    X, X_UP, Y = dataset.sample_batch("train", args.level, 1, device)
 
     model_upsampler = UpSampler(
         X.jdata.shape[-1], cfg["features"], X.jdata.shape[-1],
@@ -37,15 +37,19 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     ).to(device)
     optimizer = torch.optim.AdamW(model_upsampler.parameters(), lr=cfg["lr"])
     L = []
+    LOSS_EMA = None
     mt.count_parameters(model_upsampler)
 
-    for _ in tqdm(range(cfg["epochs"])):
+    for i in tqdm(range(cfg["epochs"])):
         optimizer.zero_grad()
-        X, X_UP, Y = dataset.sample_batch(args.level, cfg.get("batch_size", 1), device)
+        X, X_UP, Y = dataset.sample_batch("train", args.level, cfg.get("batch_size", 1), device)
         loss = (((model_upsampler(X, X_UP) - Y).jdata) ** 2).mean()
         loss.backward()
         optimizer.step()
-        L.append(loss.item())
+        if i % 20 == 0:
+            loss_val = loss.item()
+            LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
+            L.append(LOSS_EMA)
 
     plt.plot(L, label='dales_{}'.format(args.level))
     plt.yscale('log')
