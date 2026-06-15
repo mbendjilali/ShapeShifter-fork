@@ -1,6 +1,6 @@
 # DALES — niveau 0 (base 16^3 dense)
 dataset: dales
-manifest_path: dales_manifest.json
+manifest_path: configs/dales_manifest.json
 src_path: data/dales
 
 upsample_fac: 2

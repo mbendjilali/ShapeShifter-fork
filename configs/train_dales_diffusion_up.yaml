@@ -1,6 +1,6 @@
 # DALES — niveaux 1–4 (upsampling)
 dataset: dales
-manifest_path: dales_manifest.json
+manifest_path: configs/dales_manifest.json
 src_path: data/dales
 
 upsample_fac: 2
