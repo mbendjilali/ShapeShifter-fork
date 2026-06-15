@@ -21,6 +21,130 @@ def compute_base_grid(model_name, eval_batch_size, base_res=16, src_path="./data
     return X0.grid
 
 
+def compute_canonical_base_grid(
+    base_res: int = 16,
+    extent_m: float = 50.0,
+    batch: int = 1,
+    device: str = "cuda",
+    nz: int = None,
+):
+    """
+    DALES unconditional sampling: a fully-occupied dense base grid.
+
+    At level 0 for 50×50m crops (base_res=16, voxel_size=3.2m):
+      - XY: 16 × 16 voxels (51.2m)
+      - Z:  nz voxels (default: ceil(MAX_HEIGHT_M / voxel_size) = ceil(50/3.2) = 16)
+
+    All voxels start active (mask=+1); the diffusion model prunes via the mask
+    channel during sampling.
+
+    Parameters
+    ----------
+    base_res : int
+        Number of voxels in X and Y (default 16).
+    extent_m : float
+        Physical XY extent of one crop in metres (default 50.0 for DALES crops).
+    batch : int
+        Batch size (number of independent samples).
+    device : str
+    nz : int | None
+        Number of voxels in Z. Defaults to ceil(50 / voxel_size) = base_res
+        when voxel_size = extent_m / base_res, which gives an isotropic grid.
+        Pass 12 for DALES crops (covers 0..38.4m above ground at 3.2m/voxel).
+
+    Returns
+    -------
+    fvdb.GridBatch — a dense base_res × base_res × nz grid (all voxels active).
+    """
+    import fvdb
+    import math
+
+    voxel_size = extent_m / base_res
+    if nz is None:
+        # isotropic cube by default; caller can override for non-square shapes
+        nz = base_res
+    vox_origin = torch.tensor([voxel_size / 2.0] * 3, dtype=torch.float32, device=device)
+
+    ix = torch.arange(base_res, device=device)
+    iz = torch.arange(nz, device=device)
+    gi, gj, gk = torch.meshgrid(ix, ix, iz, indexing="ij")
+    ijk = torch.stack([gi.flatten(), gj.flatten(), gk.flatten()], dim=-1).to(torch.int32)
+    ijk_jag = fvdb.JaggedTensor([ijk for _ in range(batch)])
+
+    return fvdb.gridbatch_from_ijk(ijk_jag, voxel_sizes=voxel_size, origins=vox_origin)
+
+
+def load_dales_diffusion(level, src):
+    """Load a DALES checkpoint: {src}/dales_{level}_*.pt (picks most recent)."""
+    models = glob.glob('{}/dales_{}*.pt'.format(src, level))
+    if not models:
+        raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
+    models.sort()
+    diffusion = torch.load(models[-1], weights_only=False)
+    diffusion.eval()
+    return diffusion
+
+
+def compute_all_generations_dales(
+    src,
+    base_res=16,
+    extent_m=50.0,
+    max_level=4,
+    eval_batch_size=5,
+    features=10,
+    ddim_steps=None,
+    verbose=False,
+    nz=12,
+):
+    """
+    Unconditional DALES generation: noise → level 0 → … → level max_level.
+
+    Uses compute_canonical_base_grid instead of a stored crop grid.
+    For 50×50m crops: extent_m=50.0, base_res=16, nz=12 (covers 0..38.4m at 3.2m/voxel).
+    Export point clouds with save_generation_pc.
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    diffusion0 = load_dales_diffusion(0, src)
+    diffusion0.eval()
+
+    X0G = compute_canonical_base_grid(base_res, extent_m, eval_batch_size, device, nz=nz)
+    t0 = time.time()
+
+    noisy_init = grid_to_VDB(X0G, torch.randn, [features])
+    if ddim_steps is None:
+        generated_X = diffusion0.ddpm_sample(noisy_init)
+    else:
+        generated_X = diffusion0.ddim_sample(
+            noisy_init, steps=diffusion0.max_T // ddim_steps)
+
+    generated_X = DiffusionTensor.from_vdb(generated_X).remove_mask()
+    generated_Xs = [generated_X]
+    if verbose:
+        print('LEVEL 0: {:.1f}s'.format(time.time() - t0))
+
+    for i in range(1, max_level + 1):
+        generated_X = generate_level_dales(generated_X, i, src, ddim_steps, verbose)
+        generated_Xs.append(generated_X)
+
+    return generated_Xs
+
+
+def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False):
+    """Run one DALES upsampler level."""
+    diffusion = load_dales_diffusion(level, src)
+    diffusion.eval()
+    t0 = time.time()
+    new_XT, X_BLUR = generate_input(generated_X, diffusion)
+    if ddim_steps is None:
+        generated_X = diffusion.ddpm_sample(new_XT)
+    else:
+        generated_X = diffusion.ddim_sample(new_XT, steps=diffusion.max_T // ddim_steps)
+    if verbose:
+        print('LEVEL {}: {:.1f}s'.format(level, time.time() - t0))
+    return DiffusionTensor.from_vdb(generated_X).remove_mask()
+
+
 def load_diffusion(example_mesh_name, level, src):
     models = glob.glob('{}/{}_{}*.pt'.format(src, example_mesh_name, level))
     models.sort()

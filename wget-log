@@ -1,0 +1,11 @@
+--2026-04-22 11:19:42--  https://drive.usercontent.google.com/download?id=1UMN4EcE2F8XKBf1X4CMP-S2_kr9TB_UD
+Resolving drive.usercontent.google.com (drive.usercontent.google.com)... 172.217.22.65, 2a00:1450:4007:810::2001
+Connecting to drive.usercontent.google.com (drive.usercontent.google.com)|172.217.22.65|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 2367 (2,3K) [text/html]
+Saving to: ‘download?id=1UMN4EcE2F8XKBf1X4CMP-S2_kr9TB_UD’
+
+download?id=1UMN4EcE2F8XKBf1X4CMP-S2_kr9TB_UD          0%[                                                                                                                      ]       0  --.-KB/s               download?id=1UMN4EcE2F8XKBf1X4CMP-S2_kr9TB_UD        100%[=====================================================================================================================>]   2,31K  --.-KB/s    in 0s      
+
+2026-04-22 11:19:42 (64,2 MB/s) - ‘download?id=1UMN4EcE2F8XKBf1X4CMP-S2_kr9TB_UD’ saved [2367/2367]
+

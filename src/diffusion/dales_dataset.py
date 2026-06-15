@@ -1,0 +1,264 @@
+"""
+dales_dataset.py — Multi-crop DALES dataloader for diffusion training.
+
+Discovery: for each tile in the manifest, scans gt_root for directories matching
+  {tile_id}_x????_y????/ that contain {base_resolution}.pt.
+Each such directory is an independent crop sample (50×50m).
+
+Sampling: weighted by rare-class presence (inherited from tile-level metadata).
+
+Batching: fvdb.jcat of heterogeneous sparse grids.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import torch
+import fvdb
+import fvdb.nn as fvnn
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+
+from diffusion_tensor import DiffusionTensor
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+
+class DALESDataset:
+    """
+    Catalogue the available pre-encoded 50×50m crops and expose sampling.
+
+    Parameters
+    ----------
+    manifest_path : str | Path
+        Path to data/dales_manifest.json.
+    gt_root : str | Path
+        Root directory where  {tile_id}_x????_y????/{res}.pt  files live.
+    split : 'train' | 'test'
+        Which split to expose (test tiles are never used during training).
+    upsample_fac : int
+        Upsampling factor between consecutive levels (default 2).
+    base_resolution : int
+        Coarsest resolution label (default 16).
+    """
+
+    RARE_CLASSES = {3, 4, 5, 6, 7}       # Cars, Trucks, PowerLines, Fences, Poles
+    RARE_WEIGHT_MULTIPLIER = 3.0          # Up-weight crops from rare-class tiles
+
+    def __init__(
+        self,
+        manifest_path: str | Path,
+        gt_root: str | Path,
+        split: str = "train",
+        upsample_fac: int = 2,
+        base_resolution: int = 16,
+    ):
+        self.gt_root = Path(gt_root)
+        self.upsample_fac = upsample_fac
+        self.base_resolution = base_resolution
+
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        records = manifest[split]
+
+        # Build a set of tile_ids flagged as "has rare classes"
+        rare_tiles: set[str] = set()
+        for rec in records:
+            counts = rec.get("class_counts", {})
+            if any(counts.get(str(c), 0) > 0 for c in self.RARE_CLASSES):
+                rare_tiles.add(rec["id"])
+
+        # Discover all crop dirs that have the required base resolution file
+        self.crops: List[str] = []       # crop_ids
+        self.weights: List[float] = []   # sampling weights
+
+        for rec in records:
+            tile_id = rec["id"]
+            w = self.RARE_WEIGHT_MULTIPLIER if tile_id in rare_tiles else 1.0
+
+            # glob for crops belonging to this tile
+            crop_dirs = sorted(self.gt_root.glob(f"{tile_id}_x*_y*/"))
+            for d in crop_dirs:
+                if (d / f"{base_resolution}.pt").exists():
+                    self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
+                    self.weights.append(w)
+
+        if not self.crops:
+            raise RuntimeError(
+                f"No encoded crops found under {self.gt_root} for split={split}. "
+                "Run: python src/shape_encoding/pc_encoding.py --all --split train"
+            )
+
+        # Normalise weights
+        total = sum(self.weights)
+        self.weights = [w / total for w in self.weights]
+
+    # ------------------------------------------------------------------
+    # GT loading
+    # ------------------------------------------------------------------
+
+    def _load_dt(self, path: Path, device: str) -> DiffusionTensor:
+        """Load a .pt file as DiffusionTensor on the target device."""
+        obj = torch.load(path, weights_only=False)
+        if not isinstance(obj, DiffusionTensor):
+            obj = DiffusionTensor(obj.grid, obj.data)
+        return DiffusionTensor(obj.grid.to(device), obj.data.to(device))
+
+    def load_crop_level0(self, crop_id: str, device: str = "cuda") -> DiffusionTensor:
+        """Level 0: coarsest-resolution DiffusionTensor → dense."""
+        res = self.base_resolution
+        X0 = self._load_dt(self.gt_root / crop_id / f"{res}.pt", device)
+        return X0.to_custom_dense()
+
+    def load_crop_levelN(
+        self, crop_id: str, level: int, device: str = "cuda"
+    ) -> Tuple[DiffusionTensor, DiffusionTensor, DiffusionTensor]:
+        """
+        Level N>0: load coarse + fine, return (X, X_UP, X0_filled).
+        res_1 = base × 2^(level-1),  res_2 = 2 × res_1
+        """
+        res_1 = self.base_resolution * (self.upsample_fac ** (level - 1))
+        res_2 = self.upsample_fac * res_1
+        X  = self._load_dt(self.gt_root / crop_id / f"{res_1}.pt", device)
+        X0 = self._load_dt(self.gt_root / crop_id / f"{res_2}.pt", device)
+        X_UP = X.trilinear_upsample(self.upsample_fac)
+        X0   = DiffusionTensor.fill_upsampled_with_gt(X_UP, X0)
+        return X, X_UP, X0
+
+    def sample_crop_ids(self, batch_size: int) -> List[str]:
+        """Sample batch_size crop IDs (with replacement, weighted)."""
+        return random.choices(self.crops, weights=self.weights, k=batch_size)
+
+    def sample_batch(
+        self,
+        level: int,
+        batch_size: int,
+        device: str = "cuda",
+    ):
+        """
+        Sample a genuine multi-crop batch.
+
+        Returns
+        -------
+        level == 0:
+            X0  — batched dense DiffusionTensor (via fvdb.jcat)
+        level > 0:
+            (X, X_UP, X0)  — batched coarse / upsampled / fine
+        """
+        crop_ids = self.sample_crop_ids(batch_size)
+
+        if level == 0:
+            tensors = [self.load_crop_level0(c, device) for c in crop_ids]
+            return _jcat_dt(tensors)
+
+        X_list, XUP_list, X0_list = [], [], []
+        for c in crop_ids:
+            X, X_UP, X0 = self.load_crop_levelN(c, level, device)
+            X_list.append(X)
+            XUP_list.append(X_UP)
+            X0_list.append(X0)
+        return _jcat_dt(X_list), _jcat_dt(XUP_list), _jcat_dt(X0_list)
+
+    # ------------------------------------------------------------------
+    # Held-out validation
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def test_set(
+        cls, manifest_path: str | Path, gt_root: str | Path, **kw
+    ) -> "DALESDataset":
+        return cls(manifest_path, gt_root, split="test", **kw)
+
+    def compute_val_loss(
+        self,
+        diffusion,
+        level: int,
+        n_crops: int = 4,
+        clip_size: int = 20,
+        device: str = "cuda",
+    ) -> Optional[float]:
+        """Average diffusion loss on a random subset of held-out crops."""
+        if not self.crops:
+            return None
+        sample_ids = random.sample(self.crops, min(n_crops, len(self.crops)))
+        losses = []
+        for crop_id in sample_ids:
+            try:
+                if level == 0:
+                    X0 = self.load_crop_level0(crop_id, device)
+                    with torch.no_grad():
+                        loss = diffusion(X0).item()
+                else:
+                    X, X_UP, X0 = self.load_crop_levelN(crop_id, level, device)
+                    with torch.no_grad():
+                        X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
+                        X0_BLUR.grid = X0.grid
+                        x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
+                        loss = diffusion(x0c, blurc).item()
+                losses.append(loss)
+            except Exception:
+                pass
+        return sum(losses) / len(losses) if losses else None
+
+    # ------------------------------------------------------------------
+    # Debug / stats
+    # ------------------------------------------------------------------
+
+    def __len__(self) -> int:
+        return len(self.crops)
+
+    def __repr__(self) -> str:
+        return f"DALESDataset({len(self.crops)} crops, base_res={self.base_resolution})"
+
+
+# ---------------------------------------------------------------------------
+# Batching helpers
+# ---------------------------------------------------------------------------
+
+def _jcat_dt(tensors: List[DiffusionTensor]) -> DiffusionTensor:
+    """Concatenate a list of DiffusionTensors into a batch via fvdb.jcat."""
+    grids = fvdb.jcat([t.grid for t in tensors])
+    data  = fvdb.jcat([t.data for t in tensors])
+    return DiffusionTensor(grids, data)
+
+
+def clip_data_per_element(
+    X0:      fvnn.VDBTensor,
+    X0_BLUR: fvnn.VDBTensor,
+    size:    int,
+) -> Tuple[fvnn.VDBTensor, fvnn.VDBTensor]:
+    """
+    Crop one random patch per batch element independently, then re-jcat.
+
+    Picks a random voxel per element as centre, clips ±size in ijk space.
+    Uses the batched clip API (single call, no loop) to avoid device mismatches.
+    """
+    B = X0.grid_count
+    if B == 0:
+        return X0, X0_BLUR
+
+    device = X0.grid.device
+    centers = []
+    for b in range(B):
+        ijk_b = X0.grid[b].ijk.jdata   # (V_b, 3) on device
+        if len(ijk_b) == 0:
+            centers.append(torch.zeros(1, 3, dtype=torch.int32, device=device))
+        else:
+            ind = torch.randint(0, len(ijk_b), (1,), device=device)
+            centers.append(ijk_b[ind])  # (1, 3)
+
+    centers = torch.cat(centers, dim=0)             # (B, 3)
+    lo = centers - size                              # (B, 3)
+    hi = centers + size                              # (B, 3)
+
+    cf,  cg  = X0.grid.clip(X0.data, lo, hi)
+    cf2, cg2 = X0_BLUR.grid.clip(X0_BLUR.data, lo, hi)
+    return fvnn.VDBTensor(cg, cf), fvnn.VDBTensor(cg2, cf2)

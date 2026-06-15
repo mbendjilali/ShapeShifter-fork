@@ -1,0 +1,14 @@
+# DALES — upsampler pre-training
+dataset: dales
+manifest_path: data/dales_manifest.json
+src_path: data/GT_sparse_tensors/dales
+
+upsample_fac: 2
+base_resolution: 16
+
+layers: 1
+lr: 0.0005
+features: 64
+dropout: 0.05
+epochs: 10000
+batch_size: 2

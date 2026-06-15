@@ -2,6 +2,10 @@ import torch.nn as nn
 import torch
 import fvdb.nn as fvnn
 
+# TF32 in fVDB sparse conv requires Ampere+ (sm_80). Older GPUs must disable it.
+if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
+    fvnn.SparseConv3d.allow_tf32 = False
+
 
 def sinusoidal_embedding(timesteps, dim):
     half_dim = dim // 2

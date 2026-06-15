@@ -1,7 +1,11 @@
 import fvdb
 import torch
+import fvdb.nn as fvnn
 from meshplot import plot
 import numpy as np
+
+if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
+    fvnn.SparseConv3d.allow_tf32 = False
 
 
 def make_gaussian_filter(feat=1, g_size=9):

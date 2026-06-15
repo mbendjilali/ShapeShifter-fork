@@ -68,3 +68,5 @@ dependencies:
     - trimesh
     - point-cloud-utils
     - pymeshlab
+    - laspy>=2.0
+    - laszip

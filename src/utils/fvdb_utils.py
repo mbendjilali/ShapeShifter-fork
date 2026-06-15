@@ -15,6 +15,31 @@ def mesh_to_grid(v, f, grid_size, device='cuda'):
     return fvdb.gridbatch_from_mesh(v, f, voxel_sizes=voxel_sizes, origins=origins)
 
 
+def pointcloud_to_grid(points_xyz, grid_size, device='cuda'):
+    """
+    Sparse grid from points in the same world convention as mesh_to_grid (voxel size 2/grid_size,
+    domain approximately [-1, 1]^3 after NDCnormalize).
+    """
+    voxel_sizes = 2.0 / grid_size
+    vox_origin = torch.tensor(
+        [voxel_sizes / 2.0] * 3, dtype=torch.float32, device=device
+    )
+    if isinstance(points_xyz, np.ndarray):
+        pts = torch.tensor(points_xyz, dtype=torch.float32, device=device)
+    else:
+        pts = points_xyz.to(device=device, dtype=torch.float32)
+    pc_jagged = fvdb.JaggedTensor([pts])
+    # pad_min / pad_max are voxel counts (Vec3i), not world bounds; see fVDB gridbatch_from_points.
+    pad = torch.zeros(3, dtype=torch.int32, device=device)
+    return fvdb.gridbatch_from_points(
+        pc_jagged,
+        pad,
+        pad,
+        voxel_sizes,
+        vox_origin,
+    )
+
+
 def grid_to_VDB(grid: fvdb.GridBatch, torch_func=torch.zeros, additional_feat=[], dtype=torch.float32):
     size = list(grid.jidx.shape)
     size += additional_feat
