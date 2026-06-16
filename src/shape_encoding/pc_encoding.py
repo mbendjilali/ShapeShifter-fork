@@ -75,7 +75,7 @@ except ImportError as e:
 # ---------------------------------------------------------------------------
 
 DALES_ROOT = Path("/data/moussabendjilali/archive/data/dales_2")
-GT_ROOT    = Path("data/GT_sparse_tensors/dales")
+GT_ROOT    = Path("data/dales")
 
 # Crop geometry
 CROP_SIZE_M   = 50.0   # XY extent of each crop in metres
@@ -290,6 +290,10 @@ def _encode_points(
     pg = PoNQ_grid(initial_size)
     pg.from_mesh(grid.to(device), mean_xyz, normals, colors_np, device=device)
 
+    # Save the finest level (needed by the highest-level upsampler)
+    pg.compute_local_offset()
+    torch.save(_ponq_to_dt(pg, device), save_dir / f"{initial_size}.pt")
+
     size = initial_size
     for t_size in targets:
         pg = pg.get_pool(size // t_size)
@@ -348,6 +352,7 @@ def encode_tile_as_crops(
     targets:   List[int] = TARGETS,
     device:    str       = DEVICE,
     verbose:   bool      = True,
+    skip_complete: bool  = False,
 ) -> List[str]:
     """
     Encode a DALES LAZ tile as a grid of 50×50m crops.
@@ -388,6 +393,14 @@ def encode_tile_as_crops(
         # Crop ID encodes the tile + crop XY position (integer metres relative to tile origin)
         crop_id  = f"{tile_id}_x{int(x_start):04d}_y{int(y_start):04d}"
         save_dir = out_root / crop_id
+
+        # Skip crops that already have every pyramid level on disk
+        if skip_complete:
+            all_levels = [initial_size] + list(targets)
+            if all((save_dir / f"{lv}.pt").exists() for lv in all_levels):
+                saved_ids.append(crop_id)
+                continue
+
         _encode_points(xyz_c, sem_c, int_c, save_dir,
                        voxel_size_initial, initial_size, targets, device,
                        verbose=False)
@@ -511,15 +524,17 @@ if __name__ == "__main__":
     parser.add_argument("--tile",  default=None, type=str, help="Tile ID (e.g. 5080_54435)")
     parser.add_argument("--all",   action="store_true",    help="Encode all tiles in --split")
     parser.add_argument("--split", default="train", choices=["train", "test"])
-    parser.add_argument("--augment",    action="store_true", help="Add yaw/flip augmentations")
-    parser.add_argument("--export_ply", action="store_true", help="Export first crop's 256.pt as PLY")
+    parser.add_argument("--augment",       action="store_true", help="Add yaw/flip augmentations")
+    parser.add_argument("--export_ply",    action="store_true", help="Export first crop's 256.pt as PLY")
+    parser.add_argument("--skip_complete", action="store_true",
+                        help="Skip crops that already have all pyramid levels on disk")
     parser.add_argument("--out",   default=str(GT_ROOT), type=str)
     parser.add_argument("--device", default=DEVICE, type=str)
     parser.add_argument("--crop_size", default=CROP_SIZE_M,   type=float)
     parser.add_argument("--crop_stride", default=CROP_STRIDE_M, type=float)
     args = parser.parse_args()
 
-    out_root = Path(args.out)
+    out_root = Path(args.out) / args.split
     laz_dir  = DALES_ROOT / args.split
 
     tiles = ([args.tile] if args.tile else
@@ -535,7 +550,7 @@ if __name__ == "__main__":
         crop_ids = encode_tile_as_crops(
             laz_path, out_root,
             crop_size=args.crop_size, crop_stride=args.crop_stride,
-            device=args.device,
+            device=args.device, skip_complete=args.skip_complete,
         )
 
         if args.augment:

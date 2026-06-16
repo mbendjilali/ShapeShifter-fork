@@ -8,6 +8,7 @@ from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
 from model import DiffusionCNN
 from datetime import datetime
+from pathlib import Path
 import fvdb.nn as fvnn
 import argparse
 from tqdm import tqdm
@@ -143,11 +144,11 @@ def _train_dales(args, cfg, device='cuda'):
     except Exception:
         pass  # no test tiles encoded yet
 
-    # Determine channel count from first available tile
-    first_tile = dataset.crops[0]
+    # Determine channel count from first available crop
+    first_crop = dataset.crops[0]
     res_sample = cfg["base_resolution"]
     sample_dt = torch.load(
-        f"{gt_root}/train/{first_tile}/{res_sample}.pt", weights_only=False
+        Path(gt_root) / "train" / first_crop / f"{res_sample}.pt", weights_only=False
     ).to(device)
     n_channels = sample_dt.jdata.shape[-1]
     del sample_dt
@@ -215,7 +216,7 @@ def _train_dales(args, cfg, device='cuda'):
             val_every = cfg.get("val_every", cfg["save_every"])
             if val_dataset is not None and i % val_every == 0:
                 val_loss = val_dataset.compute_val_loss(
-                    diffusion, "train", args.level, n_crops=4,
+                    diffusion, "test", args.level, n_crops=4,
                     clip_size=cfg["clip_size"], device=device,
                 )
                 if val_loss is not None:
