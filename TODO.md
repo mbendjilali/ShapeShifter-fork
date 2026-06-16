@@ -73,7 +73,7 @@ Objectif : transformer N tuiles DALES en N jeux de tenseurs multi-résolution `d
 Objectif : un modèle de diffusion par niveau, entraîné sur des batches **multi-tuiles**. Les niveaux fins se généralisent quasi gratuitement (ils sont déjà conditionnés sur le contexte grossier local via crops à champ réceptif limité) ; le travail est surtout au chargement des données.
 
 ### 2.1 — Dataset/dataloader multi-tuiles (remplace la réplication)
-- [ ] Créer `src/diffusion/dales_dataset.py` exposant un échantillonnage qui, à chaque step, tire **B tuiles distinctes** (pondérées par présence des classes rares — voitures, camions, poteaux, lignes, clôtures — via les stats du manifeste) et assemble un vrai batch fVDB hétérogène via `fvdb.jcat` des grilles **différentes** + `fvdb.jcat` des données.
+- [ ] Créer `src/dataset/dales_dataset.py` exposant un échantillonnage qui, à chaque step, tire **B tuiles distinctes** (pondérées par présence des classes rares — voitures, camions, poteaux, lignes, clôtures — via les stats du manifeste) et assemble un vrai batch fVDB hétérogène via `fvdb.jcat` des grilles **différentes** + `fvdb.jcat` des données.
 - [ ] **Remplacer** `DiffusionTensor.to_batch()` (réplication) dans le chemin d'entraînement par cet assemblage multi-tuiles. (Conserver `to_batch` pour la rétro-compat de l'échantillonnage single-shape si besoin, mais ne plus l'utiliser à l'entraînement.)
 - [ ] Adapter `get_gt_data()` (dans `train_diffusion.py`) : au lieu de charger `{model_name}/{res}.pt`, charger un **mini-batch de tuiles** depuis le dataset. Garder la logique niveau 0 (dense via `to_custom_dense`) vs niveau>0 (paire `res_1`/`res_2` + `X_UP = trilinear_upsample` + `fill_upsampled_with_gt`).
 

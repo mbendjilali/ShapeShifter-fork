@@ -87,7 +87,7 @@ Classes DALES :
 
 **Créer :**
 - `src/shape_encoding/pc_encoding.py` — encodeur DALES métrique
-- `src/diffusion/dales_dataset.py` — dataloader multi-tuiles (Phase 2)
+- `src/dataset/dales_dataset.py` — dataloader multi-tuiles (Phase 2)
 - `data/dales_manifest.json` — manifeste 29+11 tuiles
 
 **Modifier :**

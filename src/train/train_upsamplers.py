@@ -19,7 +19,7 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     Multi-tile upsampler training for DALES.
     Checkpoints: checkpoints/upsamplers/dales_{level}.pt
     """
-    from dales_dataset import DALESDataset, clip_data_per_element
+    from dataset.dales_dataset import DALESDataset, clip_data_per_element
     import fvdb.nn as fvnn
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
