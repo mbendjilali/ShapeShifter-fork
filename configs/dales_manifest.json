@@ -1,7 +1,7 @@
 {
   "_comment": "DALES-2 dataset manifest. Test tiles must NEVER enter training (invariant #6). Stats (class_counts) computed by encode_all --manifest; zeros until then.",
   "dales_root": "/data/moussabendjilali/archive/data/dales_2",
-  "gt_root": "data/GT_sparse_tensors/dales",
+  "gt_root": "data/dales",
   "voxel_size_levels": {
     "256": 0.2,
     "128": 0.4,
@@ -19,8 +19,7 @@
     "7": "Poles",
     "8": "Buildings"
   },
-  "rare_classes": [3, 4, 5, 6, 7],
-  "sampling_ratio": 0.25,
+  "rare_classes": [3, 4, 5, 7],
   "train": [
     {"id": "5080_54435", "split": "train", "class_counts": {}},
     {"id": "5085_54320", "split": "train", "class_counts": {}},

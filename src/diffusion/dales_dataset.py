@@ -49,7 +49,7 @@ class DALESDataset:
         Coarsest resolution label (default 16).
     """
 
-    RARE_CLASSES = {3, 4, 5, 6, 7}       # Cars, Trucks, PowerLines, Fences, Poles
+    RARE_CLASSES = {3, 4, 6, 7}       # Cars, Trucks, PowerLines, Fences, Poles
     RARE_WEIGHT_MULTIPLIER = 3.0          # Up-weight crops from rare-class tiles
 
     def __init__(
