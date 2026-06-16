@@ -59,7 +59,7 @@ class DALESDataset:
         split: str = "train",
         upsample_fac: int = 2,
         base_resolution: int = 16,
-        sampling_ratio: float = 0.25,
+        sampling_ratio: float = 1.0,
     ):
         self.gt_root = Path(gt_root)
         self.upsample_fac = upsample_fac
