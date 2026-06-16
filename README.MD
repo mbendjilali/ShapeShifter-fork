@@ -45,20 +45,20 @@ Level 0 and all upsamplers are **independent** and can run simultaneously on the
 
 ```shell
 # Level 0 diffusion
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
     -config configs/train_dales_diffusion_0.yaml -dataset dales -level 0 &
 
 # Upsamplers levels 1–4 (independent of each other and of level 0)
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_upsamplers.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
     -config configs/train_dales_upsampler.yaml -dataset dales -level 1 &
 
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_upsamplers.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
     -config configs/train_dales_upsampler.yaml -dataset dales -level 2 &
 
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_upsamplers.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
     -config configs/train_dales_upsampler.yaml -dataset dales -level 3 &
 
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_upsamplers.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
     -config configs/train_dales_upsampler.yaml -dataset dales -level 4 &
 
 wait
@@ -71,16 +71,16 @@ Checkpoints: `checkpoints/upsamplers/dales_{level}.pt`
 Levels 1–4 are independent of each other but each requires its upsampler checkpoint.
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
     -config configs/train_dales_diffusion_up.yaml -dataset dales -level 1 &
 
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
     -config configs/train_dales_diffusion_up.yaml -dataset dales -level 2 &
 
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
     -config configs/train_dales_diffusion_up.yaml -dataset dales -level 3 &
 
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
     -config configs/train_dales_diffusion_up.yaml -dataset dales -level 4 &
 
 wait
@@ -93,10 +93,10 @@ Checkpoints: `checkpoints/diffusion_models/dales_{level}_{timestamp}.pt`
 Distribute across GPUs to reduce wall-clock time:
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/train_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
     -config configs/train_dales_diffusion_0.yaml -dataset dales -level 0 &
 
-CUDA_VISIBLE_DEVICES=1 python src/diffusion/train_upsamplers.py \
+CUDA_VISIBLE_DEVICES=1 python src/train/train_upsamplers.py \
     -config configs/train_dales_upsampler.yaml -dataset dales -level 1 &
 # … etc.
 ```
@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=1 python src/diffusion/train_upsamplers.py \
 Generate 20 unconditional 50×50m crops (4 crops/batch, DDPM):
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/sample_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/inferance/sample_diffusion.py \
     -dataset dales \
     -src checkpoints/diffusion_models \
     -out output/dales \
@@ -118,7 +118,7 @@ CUDA_VISIBLE_DEVICES=0 python src/diffusion/sample_diffusion.py \
 Faster with DDIM (100 steps instead of full 1000):
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/diffusion/sample_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/inference/sample_diffusion.py \
     -dataset dales -src checkpoints/diffusion_models \
     -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100
 ```
