@@ -1,7 +1,5 @@
 if True:
-    import os
     import sys
-#    os.chdir('/home/moussabendjilali/libs/ShapeShifter')
     sys.path.append('./src/utils')
 from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
@@ -129,10 +127,10 @@ def _train_dales(args, cfg, device='cuda'):
     """
     import sys
     sys.path.insert(0, './src/diffusion')
-    from dales_dataset import DALESDataset, clip_data_per_element
+    from dataset.dales_dataset import DALESDataset, clip_data_per_element
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
-    gt_root = cfg.get("src_path", "data/GT_sparse_tensors/dales")
+    gt_root = cfg.get("src_path", "data/dales")
     dataset = DALESDataset(manifest, gt_root, split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"])
