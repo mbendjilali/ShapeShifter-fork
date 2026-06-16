@@ -49,9 +49,6 @@ class DALESDataset:
         Coarsest resolution label (default 16).
     """
 
-    RARE_CLASSES = {3, 4, 6, 7}       # Cars, Trucks, PowerLines, Fences, Poles
-    RARE_WEIGHT_MULTIPLIER = 3.0          # Up-weight crops from rare-class tiles
-
     def __init__(
         self,
         manifest_path: str | Path,
@@ -71,21 +68,10 @@ class DALESDataset:
         records = manifest[split]
         self.sampling_ratio = manifest.get("sampling_ratio", sampling_ratio) 
 
-        # Build a set of tile_ids flagged as "has rare classes"
-        rare_tiles: set[str] = set()
-        for rec in records:
-            counts = rec.get("class_counts", {})
-            if any(counts.get(str(c), 0) > 0 for c in self.RARE_CLASSES):
-                rare_tiles.add(rec["id"])
-
-        # Discover all crop dirs that have the required base resolution file
         self.crops: List[str] = []       # crop_ids
-        self.weights: List[float] = []   # sampling weights
 
         for rec in records:
             tile_id = rec["id"]
-            w = self.RARE_WEIGHT_MULTIPLIER if tile_id in rare_tiles else 1.0
-
             # glob for crops belonging to this tile
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
 
@@ -96,7 +82,7 @@ class DALESDataset:
             for d in crop_dirs:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
-                    self.weights.append(w)
+
 
         if not self.crops:
             raise RuntimeError(
@@ -104,9 +90,6 @@ class DALESDataset:
                 "Run: python src/shape_encoding/pc_encoding.py --all --split train"
             )
 
-        # Normalise weights
-        total = sum(self.weights)
-        self.weights = [w / total for w in self.weights]
 
     # ------------------------------------------------------------------
     # GT loading
@@ -142,7 +125,7 @@ class DALESDataset:
 
     def sample_crop_ids(self, batch_size: int) -> List[str]:
         """Sample batch_size crop IDs (with replacement, weighted)."""
-        return random.choices(self.crops, weights=self.weights, k=batch_size)
+        return random.choices(self.crops, k=batch_size)
 
     def sample_batch(
         self,

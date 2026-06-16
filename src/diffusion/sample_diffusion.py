@@ -6,8 +6,6 @@ import glob
 import os
 from fvdb_utils import *
 import pymeshlab as ml
-from model import UpSampler, DiffusionCNN
-from fvdb_diffusion import SparseDiffusion
 from diffusion_tensor import DiffusionTensor
 import numpy as np
 import torch

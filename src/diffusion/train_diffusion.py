@@ -1,7 +1,5 @@
 if True:
-    import os
     import sys
-#    os.chdir('/home/moussabendjilali/libs/ShapeShifter')
     sys.path.append('./src/utils')
 from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
