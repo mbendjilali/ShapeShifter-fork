@@ -4,7 +4,7 @@ if True:
 from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
-from model import DiffusionCNN
+from model import DiffusionCNN, count_parameters
 from datetime import datetime
 from pathlib import Path
 import fvdb.nn as fvnn
@@ -13,7 +13,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch
-import mesh_tools as mt
 import yaml
 import os
 
@@ -126,17 +125,16 @@ def _train_dales(args, cfg, device='cuda'):
     Checkpoints: checkpoints/diffusion_models/dales_{level}_{time}.pt
     """
     import sys
-    sys.path.insert(0, './src/diffusion')
+    sys.path.insert(0, './src')
     from dataset.dales_dataset import DALESDataset, clip_data_per_element
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
-    gt_root = cfg.get("src_path", "data/dales")
-    dataset = DALESDataset(manifest, gt_root, split="train",
+    dataset = DALESDataset(manifest, split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"])
     val_dataset = None
     try:
-        val_dataset = DALESDataset.test_set(manifest, gt_root,
+        val_dataset = DALESDataset.test_set(manifest, split="test",
                                              upsample_fac=cfg["upsample_fac"],
                                              base_resolution=cfg["base_resolution"])
     except Exception:
@@ -146,7 +144,7 @@ def _train_dales(args, cfg, device='cuda'):
     first_crop = dataset.crops[0]
     res_sample = cfg["base_resolution"]
     sample_dt = torch.load(
-        Path(gt_root) / "train" / first_crop / f"{res_sample}.pt", weights_only=False
+        dataset.gt_root / "train" / first_crop / f"{res_sample}.pt", weights_only=False
     ).to(device)
     n_channels = sample_dt.jdata.shape[-1]
     del sample_dt
@@ -160,7 +158,7 @@ def _train_dales(args, cfg, device='cuda'):
         in_channels=n_channels,
         out_channels=n_channels,
     ).to(device)
-    mt.count_parameters(model)
+    count_parameters(model)
 
     model_upsampler = None
     if args.level > 0:
@@ -270,70 +268,3 @@ if __name__ == '__main__':
 
     if dataset_name == "dales":
         _train_dales(args, cfg, device)
-
-    else:
-        # Legacy single-shape mode (unchanged)
-        if args.model_name is None:
-            raise ValueError("Provide -model_name for single-shape mode or -dataset dales")
-
-        if args.level > 0:
-            X, X_UP, X0 = get_gt_data(cfg, args.level, args.model_name)
-            model_upsampler = torch.load(
-                './checkpoints/upsamplers/{}_{}.pt'.format(args.model_name, args.level),
-                weights_only=False)
-            model_upsampler.eval()
-            with torch.no_grad():
-                X0_BLUR = model_upsampler(X, X_UP).detach()
-            X0_BLUR.grid = X0.grid
-        else:
-            X0 = get_gt_data(cfg, args.level, args.model_name)
-
-        L = []
-        LOSS_EMA = None
-        model = DiffusionCNN(channels=cfg["features"], layers=cfg["layers"], time_emb=cfg["time_emb"],
-                             one_layers=cfg["one_layers"], first_ks=cfg["first_ks"],
-                             in_channels=X0.jdata.shape[-1], out_channels=X0.jdata.shape[-1]).to(device)
-        mt.count_parameters(model)
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
-        diffusion = SparseDiffusion(
-            model,
-            timesteps=cfg["diffusion_timesteps"],
-            max_T=cfg.get("max_T", None) if args.level > 0 else None,
-            loss=nn.functional.mse_loss,
-            model_upsampler=model_upsampler if args.level > 0 else None,
-        ).cuda()
-
-        current_time = datetime.today().strftime('%d-%m-%H:%M')
-
-        def train_epoch(optimizer, diffusion):
-            global LOSS_EMA
-            optimizer.zero_grad()
-            if args.level > 0:
-                loss = diffusion(*clip_data(X0, X0_BLUR, cfg["clip_size"]))
-            else:
-                loss = diffusion(X0)
-            torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
-            loss.backward()
-            optimizer.step()
-            if LOSS_EMA is None:
-                LOSS_EMA = loss.item()
-            else:
-                LOSS_EMA = 0.99 * LOSS_EMA + 0.01 * loss.item()
-            L.append(LOSS_EMA)
-
-        model.train()
-        for i in tqdm(range(cfg["epochs"])):
-            train_epoch(optimizer, diffusion)
-            if i % cfg["save_every"] == 0 or i == cfg["epochs"] - 1:
-                plt.clf()
-                plt.plot(L, label=args.model_name)
-                plt.yscale('log')
-                plt.legend()
-                plt.savefig('checkpoints/diffusion_models/{}_{}_{}.png'.format(
-                    args.model_name, args.level, current_time))
-
-        torch.save(diffusion, 'checkpoints/diffusion_models/{}_{}_{}.pt'.format(
-            args.model_name, args.level, current_time))
-        print('checkpoints/diffusion_models/{}_{}_{}.pt'.format(
-            args.model_name, args.level, current_time))

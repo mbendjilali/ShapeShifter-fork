@@ -18,8 +18,7 @@
     "7": "Poles",
     "8": "Buildings"
   },
-  "rare_classes": [3, 4, 5, 7],
-  "rare_weight_multiplier": 3.0,
+  "sampling_ratio": 0.10,
   "train": [
     {"id": "5080_54435", "split": "train"},
     {"id": "5085_54320", "split": "train"},

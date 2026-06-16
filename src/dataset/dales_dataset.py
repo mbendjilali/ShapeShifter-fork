@@ -39,8 +39,6 @@ class DALESDataset:
     ----------
     manifest_path : str | Path
         Path to data/dales_manifest.json.
-    gt_root : str | Path
-        Root directory where  {tile_id}_x????_y????/{res}.pt  files live.
     split : 'train' | 'test'
         Which split to expose (test tiles are never used during training).
     upsample_fac : int
@@ -52,13 +50,11 @@ class DALESDataset:
     def __init__(
         self,
         manifest_path: str | Path,
-        gt_root: str | Path,
         split: str = "train",
         upsample_fac: int = 2,
         base_resolution: int = 16,
         sampling_ratio: float = 1.0,
     ):
-        self.gt_root = Path(gt_root)
         self.upsample_fac = upsample_fac
         self.base_resolution = base_resolution
 
@@ -66,23 +62,27 @@ class DALESDataset:
             manifest = json.load(f)
 
         records = manifest[split]
+        self.gt_root = Path(manifest.get("gt_root", "data/dales"))
         self.sampling_ratio = manifest.get("sampling_ratio", sampling_ratio) 
 
         self.crops: List[str] = []       # crop_ids
 
+        total_of_samples = 0
+        total_of_crops = 0
         for rec in records:
             tile_id = rec["id"]
             # glob for crops belonging to this tile
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
-
+            total_of_crops += len(crop_dirs)
             if self.sampling_ratio:
                 n = int(len(crop_dirs) * self.sampling_ratio)
+                total_of_samples += n
                 crop_dirs = random.sample(crop_dirs, n)
 
             for d in crop_dirs:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
-
+        print(f"Sampling {total_of_samples} crops among {total_of_crops}.")
 
         if not self.crops:
             raise RuntimeError(
@@ -164,9 +164,9 @@ class DALESDataset:
 
     @classmethod
     def test_set(
-        cls, manifest_path: str | Path, gt_root: str | Path, **kw
+        cls, manifest_path: str | Path, **kw
     ) -> "DALESDataset":
-        return cls(manifest_path, gt_root, split="test", **kw)
+        return cls(manifest_path, split="test", **kw)
 
     def compute_val_loss(
         self,

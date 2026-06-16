@@ -1,13 +1,11 @@
 if True:
     import sys
-    sys.path.append('./src/utils')
-    sys.path.append('./src/diffusion')
-import mesh_tools as mt
+    sys.path.append('./src')
 import torch
 from tqdm import tqdm
-from fvdb_utils import *
+from utils.fvdb_utils import *
 import matplotlib.pyplot as plt
-from model import UpSampler
+from utils.model import UpSampler, count_parameters
 import yaml
 import argparse
 from train_diffusion import get_gt_data
@@ -19,12 +17,10 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     Multi-tile upsampler training for DALES.
     Checkpoints: checkpoints/upsamplers/dales_{level}.pt
     """
-    from dataset.dales_dataset import DALESDataset, clip_data_per_element
-    import fvdb.nn as fvnn
+    from dataset.dales_dataset import DALESDataset
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
-    gt_root = cfg.get("src_path", "data/GT_sparse_tensors/dales")
-    dataset = DALESDataset(manifest, gt_root, split="train",
+    dataset = DALESDataset(manifest, split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"])
 
@@ -38,7 +34,7 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     optimizer = torch.optim.AdamW(model_upsampler.parameters(), lr=cfg["lr"])
     L = []
     LOSS_EMA = None
-    mt.count_parameters(model_upsampler)
+    count_parameters(model_upsampler)
 
     for i in tqdm(range(cfg["epochs"])):
         optimizer.zero_grad()

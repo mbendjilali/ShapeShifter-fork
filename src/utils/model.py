@@ -6,6 +6,15 @@ import fvdb.nn as fvnn
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
     fvnn.SparseConv3d.allow_tf32 = False
 
+def count_parameters(model, print_result=True):
+    num = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if print_result:
+        if num > 1e6:
+            print("The model has {:.1f}M parameters".format(num/1000000))
+        elif num > 1000:
+            print("The model has {:.1f}k parameters".format(num/1000))
+        return
+    return num
 
 def sinusoidal_embedding(timesteps, dim):
     half_dim = dim // 2
