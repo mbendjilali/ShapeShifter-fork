@@ -127,7 +127,7 @@ def _train_dales(args, cfg, device='cuda'):
     """
     import sys
     sys.path.insert(0, './src/diffusion')
-    from dales_dataset import DALESDataset, clip_data_per_element
+    from dataset.dales_dataset import DALESDataset, clip_data_per_element
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
     gt_root = cfg.get("src_path", "data/dales")
