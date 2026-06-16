@@ -103,7 +103,26 @@ CUDA_VISIBLE_DEVICES=1 python src/diffusion/train_upsamplers.py \
 
 ## Generation
 
+Generate 20 unconditional 50×50m crops (4 crops/batch, DDPM):
+
 ```shell
-python src/diffusion/sample_diffusion.py \
-    -src checkpoints/diffusion_models -levels 4 -batch_size 5
+CUDA_VISIBLE_DEVICES=0 python src/diffusion/sample_diffusion.py \
+    -dataset dales \
+    -src checkpoints/diffusion_models \
+    -out output/dales \
+    -levels 4 \
+    -batch_size 4 \
+    -total_num 20
 ```
+
+Faster with DDIM (100 steps instead of full 1000):
+
+```shell
+CUDA_VISIBLE_DEVICES=0 python src/diffusion/sample_diffusion.py \
+    -dataset dales -src checkpoints/diffusion_models \
+    -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100
+```
+
+Outputs in `output/dales/`:
+- `gen_{i}_{level}.ply` — point cloud at each pyramid level, coloured by semantic class
+- `gen_{i}_{level}.pt`  — raw DiffusionTensor (for downstream use)

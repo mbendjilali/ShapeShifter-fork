@@ -252,55 +252,124 @@ def save_generation_pc(generated_X, src_path, level=0, inds=None, min_ind=0):
             print('void shape!')
 
 
+# DALES semantic class palette (class index 0-based → RGB float32 in [0,1])
+# Index = sem_class - 1: 0=Ground 1=Veg 2=Cars 3=Trucks 4=PowerLines 5=Fences 6=Poles 7=Buildings
+_DALES_PALETTE = np.array([
+    [0.50, 0.50, 0.50],  # Ground       — grey
+    [0.13, 0.50, 0.13],  # Vegetation   — green
+    [1.00, 0.20, 0.20],  # Cars         — red
+    [1.00, 0.65, 0.00],  # Trucks       — orange
+    [1.00, 1.00, 0.00],  # PowerLines   — yellow
+    [0.50, 0.00, 0.50],  # Fences       — purple
+    [0.00, 1.00, 1.00],  # Poles        — cyan
+    [0.20, 0.20, 1.00],  # Buildings    — blue
+], dtype=np.float32)
+
+
+def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
+    """
+    Export a DALES generation batch as PLY, coloured by semantic class.
+
+    Channels layout: [0:3] normals, [3:6] offset (→ position), [6] intensity,
+                     [7] height, [8] sem_class_norm (0–1), mask already removed.
+    """
+    for ind in range(generated_X.grid_count):
+        g = DiffusionTensor(
+            generated_X.grid[ind], generated_X.data[ind]
+        ).get_global().remove_mask()
+
+        normals, positions, colors, _ = DiffusionTensor.get_feature_data(g.jdata)
+
+        if len(positions) == 0:
+            print(f'  sample {min_ind + ind} level {level}: void — skipped')
+            continue
+
+        positions_np = positions.cpu().numpy()
+        normals_np   = normals.cpu().numpy()
+        normals_np  /= np.maximum(np.linalg.norm(normals_np, axis=-1, keepdims=True), 1e-10)
+
+        colors_np = colors.cpu().numpy()   # (V, 3): [intensity, height, sem_class_norm]
+        sem_norm  = np.clip(colors_np[:, 2], 0.0, 1.0)
+        class_idx = np.round(sem_norm * 7).astype(int).clip(0, 7)
+        rgb       = _DALES_PALETTE[class_idx]          # (V, 3) in [0, 1]
+
+        ply_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.ply')
+        export_pc(positions_np, normals_np, rgb, save_pc_path=ply_path)
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Evaluate Model')
-    # Experiment
-    parser.add_argument('-src',
-                        default="checkpoints/diffusion_models/", type=str, help="input folder (contains .pt models)")
+    parser = argparse.ArgumentParser(description='DALES / ShapeShifter inference')
+    parser.add_argument('-dataset', default=None, type=str,
+                        help="'dales' for DALES mode; omit for legacy single-shape mode")
+    parser.add_argument('-src', default='checkpoints/diffusion_models/', type=str,
+                        help='Folder containing .pt checkpoint files')
     parser.add_argument('-out', default=None, type=str,
-                        help="output folder")
-    parser.add_argument('-levels', default=4,
-                        type=int, help="number of sudivisions")
+                        help='Output folder (default: output/dales or output/<name>)')
+    parser.add_argument('-levels', default=4, type=int,
+                        help='Number of upsampling levels')
     parser.add_argument('-ddim_steps', default=None, type=int,
-                        help="ddim_steps, is None then ddpm is used")
-    parser.add_argument('-batch_size', default=5, type=int,
-                        help="batch size")
-    parser.add_argument('-total_num', default=10, type=int,
-                        help="total number of generated shapes")
-    parser.add_argument('-base_res', default=16, type=int,
-                        help="base resolution")
+                        help='DDIM steps (None → full DDPM)')
+    parser.add_argument('-batch_size', default=4, type=int,
+                        help='Crops generated per forward pass')
+    parser.add_argument('-total_num', default=20, type=int,
+                        help='Total number of crops to generate')
+    parser.add_argument('-base_res', default=16, type=int)
+    parser.add_argument('-nz', default=12, type=int,
+                        help='Z voxels at level 0 (DALES: 12 → covers 0..38.4m at 3.2m/vox)')
     args = parser.parse_args()
 
-    SRC = args.src+'/'
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    SRC = args.src.rstrip('/') + '/'
 
-    if args.out is None:
-        OUT = SRC.replace("checkpoints/diffusion_models", "output")
-    else:
-        OUT = args.out
-    try:
-        os.mkdir(OUT)
-    except:
-        print('dir exists!')    
-    names = np.unique([e.split('_')[0] for e in os.listdir(SRC)])
-    print('NAMES: ', ' '.join(names))
-    for name in names:
-        # for name in ["vase"]:
-        save_path = '{}/{}'.format(OUT, name)
-        for _ in range(args.total_num//args.batch_size):
-            try:
-                os.mkdir(save_path)
-                min_ind = 0
-            except:
-                c_f = glob.glob("{}/gen_*.ply".format(save_path))
-                min_ind = max([int(e[-7]) for e in c_f])+1
-                print('dir exists!')
+    # ------------------------------------------------------------------
+    # DALES unconditional generation
+    # ------------------------------------------------------------------
+    if args.dataset == 'dales':
+        OUT = args.out or 'output/dales'
+        os.makedirs(OUT, exist_ok=True)
+        n_batches = max(1, args.total_num // args.batch_size)
+        print(f'Generating {n_batches * args.batch_size} DALES crops '
+              f'({n_batches} batches of {args.batch_size}) → {OUT}')
+
+        for batch_i in range(n_batches):
+            min_ind = batch_i * args.batch_size
+            t0 = time.time()
             with torch.no_grad():
-                GX = compute_all_generations(
-                    name, SRC, args.base_res, max_level=args.levels, eval_batch_size=args.batch_size, ddim_steps=args.ddim_steps)
+                GX = compute_all_generations_dales(
+                    src=SRC,
+                    base_res=args.base_res,
+                    max_level=args.levels,
+                    eval_batch_size=args.batch_size,
+                    ddim_steps=args.ddim_steps,
+                    nz=args.nz,
+                    verbose=True,
+                )
+            print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving PLYs …')
+            for level_i, g in enumerate(GX):
+                torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
+                save_dales_pc(g, OUT, level=level_i, min_ind=min_ind)
+
+    # ------------------------------------------------------------------
+    # Legacy single-shape mode (original ShapeShifter behaviour)
+    # ------------------------------------------------------------------
+    else:
+        OUT = args.out or SRC.replace('checkpoints/diffusion_models', 'output')
+        os.makedirs(OUT, exist_ok=True)
+        names = np.unique([e.split('_')[0] for e in os.listdir(SRC)])
+        print('NAMES: ', ' '.join(names))
+        for name in names:
+            save_path = os.path.join(OUT, name)
+            for batch_i in range(args.total_num // args.batch_size):
+                os.makedirs(save_path, exist_ok=True)
+                existing = glob.glob(os.path.join(save_path, 'gen_*.ply'))
+                min_ind = (max(int(e[-7]) for e in existing) + 1) if existing else 0
+                with torch.no_grad():
+                    GX = compute_all_generations(
+                        name, SRC, args.base_res,
+                        max_level=args.levels,
+                        eval_batch_size=args.batch_size,
+                        ddim_steps=args.ddim_steps,
+                    )
                 for i, g in enumerate(GX):
-                    path = '{}/gen_{}_{}.pt'.format(save_path, min_ind, i)
-                    torch.save(g, path)
+                    torch.save(g, os.path.join(save_path, f'gen_{min_ind}_{i}.pt'))
                     save_generation_pc(g, save_path, i, min_ind=min_ind)

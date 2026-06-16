@@ -1,5 +1,4 @@
 {
-  "_comment": "DALES-2 dataset manifest. Test tiles must NEVER enter training (invariant #6). Stats (class_counts) computed by encode_all --manifest; zeros until then.",
   "dales_root": "/data/moussabendjilali/archive/data/dales_2",
   "gt_root": "data/dales",
   "voxel_size_levels": {
