@@ -59,6 +59,7 @@ class DALESDataset:
         split: str = "train",
         upsample_fac: int = 2,
         base_resolution: int = 16,
+        sampling_ratio: float = 0.25,
     ):
         self.gt_root = Path(gt_root)
         self.upsample_fac = upsample_fac
@@ -68,6 +69,7 @@ class DALESDataset:
             manifest = json.load(f)
 
         records = manifest[split]
+        self.sampling_ratio = manifest.get("sampling_ratio", sampling_ratio) 
 
         # Build a set of tile_ids flagged as "has rare classes"
         rare_tiles: set[str] = set()
@@ -86,6 +88,11 @@ class DALESDataset:
 
             # glob for crops belonging to this tile
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
+
+            if self.sampling_ratio:
+                n = int(len(crop_dirs) * self.sampling_ratio)
+                crop_dirs = random.sample(crop_dirs, n)
+
             for d in crop_dirs:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"

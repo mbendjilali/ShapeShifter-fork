@@ -20,6 +20,7 @@
     "8": "Buildings"
   },
   "rare_classes": [3, 4, 5, 6, 7],
+  "sampling_ratio": 0.25,
   "train": [
     {"id": "5080_54435", "split": "train", "class_counts": {}},
     {"id": "5085_54320", "split": "train", "class_counts": {}},
@@ -65,3 +66,4 @@
     {"id": "5175_54395", "split": "test", "class_counts": {}}
   ]
 }
+
