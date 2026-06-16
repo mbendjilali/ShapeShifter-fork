@@ -159,7 +159,6 @@ data
 checkpoints
 output
 meshed_output
-openvdb
 
 *.pt
 *.pth
