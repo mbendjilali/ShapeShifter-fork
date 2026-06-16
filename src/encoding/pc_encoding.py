@@ -44,6 +44,7 @@ python src/shape_encoding/pc_encoding.py --tile 5080_54435 --export_ply
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -71,36 +72,6 @@ except ImportError as e:
     raise RuntimeError("scipy required: pip install scipy") from e
 
 # ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-DALES_ROOT = Path("/data/moussabendjilali/archive/data/dales_2")
-GT_ROOT    = Path("data/dales")
-
-# Crop geometry
-CROP_SIZE_M   = 50.0   # XY extent of each crop in metres
-CROP_STRIDE_M = 50.0   # XY stride (= CROP_SIZE_M → no overlap)
-
-# Voxel pyramid
-VOXEL_SIZE_INITIAL = 0.2    # metres at finest level (→ ~250 voxels for 50m crop)
-INITIAL_SIZE       = 256    # PoNQ_grid label for the 0.2m grid
-TARGETS            = [128, 64, 32, 16]  # pool levels to save
-
-# Feature normalisation
-GROUND_CLASS = 1
-N_CLASSES    = 8        # DALES classes 1..8
-MAX_HEIGHT_M = 50.0     # height normalisation ceiling
-
-# DTM parameters (computed on full tile for robustness)
-DTM_CELL_M = 10.0
-DTM_SIGMA  = 2.0
-
-# Minimum points per crop to encode (skip near-empty edge crops)
-MIN_POINTS_PER_CROP = 500
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
 
@@ -120,26 +91,24 @@ def load_dales_laz(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 # Terrain detrending
 # ---------------------------------------------------------------------------
 
-def build_dtm_interpolator(xyz: np.ndarray, sem: np.ndarray,
-                           cell_m: float = DTM_CELL_M,
-                           sigma: float = DTM_SIGMA):
+def build_dtm_interpolator(cfg, xyz: np.ndarray, sem: np.ndarray):
     """
     Build a (x, y) → ground_z bilinear interpolator from ground points.
     Best called on the FULL tile before cropping so the DTM has dense coverage.
     """
-    gp = xyz[sem == GROUND_CLASS]
+    gp = xyz[sem == cfg["ground_class"]]
     if len(gp) == 0:
         z_fallback = float(xyz[:, 2].min())
         return lambda pts: np.full(len(pts), z_fallback, dtype=np.float32)
 
     x0, y0 = float(xyz[:, 0].min()), float(xyz[:, 1].min())
-    nx = int(np.ceil((xyz[:, 0].max() - x0) / cell_m)) + 2
-    ny = int(np.ceil((xyz[:, 1].max() - y0) / cell_m)) + 2
+    nx = int(np.ceil((xyz[:, 0].max() - x0) / cfg["dtm_cell_m"])) + 2
+    ny = int(np.ceil((xyz[:, 1].max() - y0) / cfg["dtm_cell_m"])) + 2
 
     dtm = np.full((nx, ny), np.nan, dtype=np.float64)
 
-    gi = np.clip(((gp[:, 0] - x0) / cell_m).astype(int), 0, nx - 1)
-    gj = np.clip(((gp[:, 1] - y0) / cell_m).astype(int), 0, ny - 1)
+    gi = np.clip(((gp[:, 0] - x0) / cfg["dtm_cell_m"]).astype(int), 0, nx - 1)
+    gj = np.clip(((gp[:, 1] - y0) / cfg["dtm_cell_m"]).astype(int), 0, ny - 1)
 
     flat   = gi * ny + gj
     order  = np.argsort(flat)
@@ -155,10 +124,10 @@ def build_dtm_interpolator(xyz: np.ndarray, sem: np.ndarray,
         _, (ri, ci) = distance_transform_edt(nan_mask, return_indices=True)
         dtm[nan_mask] = dtm[ri[nan_mask], ci[nan_mask]]
 
-    dtm = gaussian_filter(dtm, sigma=sigma)
+    dtm = gaussian_filter(dtm, sigma=cfg["dtm_sigma"])
 
-    xi_vals = x0 + np.arange(nx) * cell_m
-    yi_vals = y0 + np.arange(ny) * cell_m
+    xi_vals = x0 + np.arange(nx) * cfg["dtm_cell_m"]
+    yi_vals = y0 + np.arange(ny) * cfg["dtm_cell_m"]
     interp  = RegularGridInterpolator(
         (xi_vals, yi_vals), dtm,
         method="linear", bounds_error=False, fill_value=None,
@@ -174,7 +143,7 @@ def build_dtm_interpolator(xyz: np.ndarray, sem: np.ndarray,
 # fVDB grid — metric, no NDCnormalize
 # ---------------------------------------------------------------------------
 
-def build_metric_grid(xyz: np.ndarray, voxel_size: float, device: str = DEVICE):
+def build_metric_grid(xyz: np.ndarray, voxel_size: float, device: str):
     """Sparse fVDB grid at fixed metric voxel_size (no NDCnormalize)."""
     pts     = torch.tensor(xyz, dtype=torch.float32, device=device)
     pc_jag  = fvdb.JaggedTensor([pts])
@@ -188,20 +157,19 @@ def build_metric_grid(xyz: np.ndarray, voxel_size: float, device: str = DEVICE):
 # ---------------------------------------------------------------------------
 
 def aggregate_voxels(
+    cfg,
     xyz:       np.ndarray,   # (N,3) detrended, XY origin-shifted
     sem:       np.ndarray,   # (N,)  uint8 1–8
     intensity: np.ndarray,   # (N,)  float32 0–1
     height:    np.ndarray,   # (N,)  float32 0–1
-    voxel_size: float,
-    device: str = DEVICE,
 ):
     """
     Returns (grid, mean_xyz, pca_normals, mean_intensity, mean_height, class_norm)
     all arrays shape (V, *).
     """
-    grid    = build_metric_grid(xyz, voxel_size, device)
-    pts     = torch.tensor(xyz, dtype=torch.float32, device=device)
-    ijk     = torch.floor(pts / voxel_size).to(torch.int32)
+    grid    = build_metric_grid(xyz, cfg["voxel_size_initial"], cfg["device"])
+    pts     = torch.tensor(xyz, dtype=torch.float32, device=cfg["device"])
+    ijk     = torch.floor(pts / cfg["voxel_size_initial"]).to(torch.int32)
     ids_raw = grid.ijk_to_index(fvdb.JaggedTensor([ijk])).jdata.cpu().numpy()
     voxel_ids = np.where(ids_raw < 0, 0, ids_raw)
 
@@ -240,11 +208,11 @@ def aggregate_voxels(
 
     # majority vote for semantic class
     sem_t  = torch.tensor(sem.astype(np.int64) - 1, dtype=torch.long)
-    oh     = torch.zeros(N, N_CLASSES)
+    oh     = torch.zeros(N, cfg["n_classes"])
     oh.scatter_(1, sem_t.unsqueeze(1), 1.0)
-    cc     = torch.zeros(V, N_CLASSES).scatter_add_(
-        0, vids.unsqueeze(1).expand(-1, N_CLASSES), oh)
-    class_norm = (cc.argmax(1).float() / max(N_CLASSES - 1, 1)).numpy().astype(np.float32)
+    cc     = torch.zeros(V, cfg["n_classes"]).scatter_add_(
+        0, vids.unsqueeze(1).expand(-1, cfg["n_classes"]), oh)
+    class_norm = (cc.argmax(1).float() / max(cfg["n_classes"] - 1, 1)).numpy().astype(np.float32)
 
     return grid, mean_xyz, normals, mean_intensity, mean_height, class_norm
 
@@ -269,68 +237,62 @@ def _ponq_to_dt(pg: PoNQ_grid, device: str) -> DiffusionTensor:
 # ---------------------------------------------------------------------------
 
 def _encode_points(
+    cfg,
     xyz:       np.ndarray,   # detrended + XY shifted to [0, CROP_SIZE_M)
     sem:       np.ndarray,
     intensity: np.ndarray,
     save_dir:  Path,
-    voxel_size_initial: float = VOXEL_SIZE_INITIAL,
-    initial_size:       int   = INITIAL_SIZE,
-    targets:   List[int]      = TARGETS,
-    device:    str            = DEVICE,
-    verbose:   bool           = False,
+    verbose:   bool = False,
 ) -> None:
     """Voxelise, pool, and save a pyramid for one set of points."""
     save_dir.mkdir(parents=True, exist_ok=True)
-    height = np.clip(xyz[:, 2], 0.0, MAX_HEIGHT_M) / MAX_HEIGHT_M
+    height = np.clip(xyz[:, 2], 0.0, cfg["max_height_m"]) / cfg["max_height_m"]
     grid, mean_xyz, normals, mean_int, mean_h, cls_n = aggregate_voxels(
-        xyz, sem, intensity, height, voxel_size_initial, device
+        cfg, xyz, sem, intensity, height
     )
     colors_np = np.stack([mean_int, mean_h, cls_n], axis=-1).astype(np.float32)
 
-    pg = PoNQ_grid(initial_size)
-    pg.from_mesh(grid.to(device), mean_xyz, normals, colors_np, device=device)
+    pg = PoNQ_grid(cfg["initial_size"])
+    pg.from_mesh(grid.to(cfg["device"]), mean_xyz, normals, colors_np, device=cfg["device"])
 
     # Save the finest level (needed by the highest-level upsampler)
     pg.compute_local_offset()
-    torch.save(_ponq_to_dt(pg, device), save_dir / f"{initial_size}.pt")
+    torch.save(_ponq_to_dt(pg, cfg["device"]), save_dir / f"{cfg['initial_size']}.pt")
 
-    size = initial_size
-    for t_size in targets:
+    size = cfg["initial_size"]
+    for t_size in cfg["targets"]:
         pg = pg.get_pool(size // t_size)
         pg.compute_local_offset()
-        torch.save(_ponq_to_dt(pg, device), save_dir / f"{t_size}.pt")
+        torch.save(_ponq_to_dt(pg, cfg["device"]), save_dir / f"{t_size}.pt")
         size = t_size
 
     if verbose:
-        print(f"    → {save_dir.name}  ({int(grid.total_voxels):,} voxels at {voxel_size_initial}m)")
+        print(f"    → {save_dir.name}  ({int(grid.total_voxels):,} voxels at {cfg['voxel_size_initial']}m)")
 
 
 # ---------------------------------------------------------------------------
 # Crop splitting
 # ---------------------------------------------------------------------------
 
-def _crop_ids(xyz: np.ndarray,
-              crop_size: float = CROP_SIZE_M,
-              stride:    float = CROP_STRIDE_M) -> List[Tuple[float, float]]:
+def _crop_ids(cfg, xyz: np.ndarray) -> List[Tuple[float, float]]:
     """Return (x_start, y_start) pairs covering the tile."""
     x0, y0 = float(xyz[:, 0].min()), float(xyz[:, 1].min())
     x1, y1 = float(xyz[:, 0].max()), float(xyz[:, 1].max())
-    xs = np.arange(x0, x1, stride)
-    ys = np.arange(y0, y1, stride)
+    xs = np.arange(x0, x1, cfg["crop_stride_m"])
+    ys = np.arange(y0, y1, cfg["crop_stride_m"])
     return [(float(x), float(y)) for x in xs for y in ys]
 
 
-def _extract_crop(xyz: np.ndarray, sem: np.ndarray, intensity: np.ndarray,
+def _extract_crop(cfg, xyz: np.ndarray, sem: np.ndarray, intensity: np.ndarray,
                   x_start: float, y_start: float,
-                  crop_size: float = CROP_SIZE_M
                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Extract points in [x_start, x_start+crop_size) × [y_start, y_start+crop_size).
     Shifts XY so the crop starts at (0, 0) — voxel indices begin near 0.
     """
     mask = (
-        (xyz[:, 0] >= x_start) & (xyz[:, 0] < x_start + crop_size) &
-        (xyz[:, 1] >= y_start) & (xyz[:, 1] < y_start + crop_size)
+        (xyz[:, 0] >= x_start) & (xyz[:, 0] < x_start + cfg["crop_size_m"]) &
+        (xyz[:, 1] >= y_start) & (xyz[:, 1] < y_start + cfg["crop_size_m"])
     )
     xyz_c = xyz[mask].copy()
     xyz_c[:, 0] -= x_start   # shift to local origin
@@ -343,14 +305,9 @@ def _extract_crop(xyz: np.ndarray, sem: np.ndarray, intensity: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def encode_tile_as_crops(
+    cfg,
     laz_path:  Path,
     out_root:  Path,
-    crop_size:    float = CROP_SIZE_M,
-    crop_stride:  float = CROP_STRIDE_M,
-    voxel_size_initial: float = VOXEL_SIZE_INITIAL,
-    initial_size: int   = INITIAL_SIZE,
-    targets:   List[int] = TARGETS,
-    device:    str       = DEVICE,
     verbose:   bool      = True,
     skip_complete: bool  = False,
 ) -> List[str]:
@@ -375,19 +332,19 @@ def encode_tile_as_crops(
     # Build DTM on full tile (better coverage than per-crop)
     if verbose:
         print("  Building DTM …")
-    dtm_fn = build_dtm_interpolator(xyz, sem)
+    dtm_fn = build_dtm_interpolator(cfg, xyz, sem)
 
     # Detrend the whole tile at once
     ground_z = dtm_fn(xyz)
     xyz_d = xyz.copy()
     xyz_d[:, 2] -= ground_z
 
-    crop_origins = _crop_ids(xyz_d, crop_size, crop_stride)
+    crop_origins = _crop_ids(cfg, xyz_d)
     saved_ids = []
 
     for x_start, y_start in tqdm(crop_origins, desc="Extracting crops"):
-        xyz_c, sem_c, int_c = _extract_crop(xyz_d, sem, intensity, x_start, y_start, crop_size)
-        if len(xyz_c) < MIN_POINTS_PER_CROP:
+        xyz_c, sem_c, int_c = _extract_crop(cfg, xyz_d, sem, intensity, x_start, y_start)
+        if len(xyz_c) < cfg["min_points_per_crop"]:
             continue
 
         # Crop ID encodes the tile + crop XY position (integer metres relative to tile origin)
@@ -396,13 +353,12 @@ def encode_tile_as_crops(
 
         # Skip crops that already have every pyramid level on disk
         if skip_complete:
-            all_levels = [initial_size] + list(targets)
+            all_levels = [cfg["initial_size"]] + list(cfg["targets"])
             if all((save_dir / f"{lv}.pt").exists() for lv in all_levels):
                 saved_ids.append(crop_id)
                 continue
 
-        _encode_points(xyz_c, sem_c, int_c, save_dir,
-                       voxel_size_initial, initial_size, targets, device,
+        _encode_points(cfg, xyz_c, sem_c, int_c, save_dir,
                        verbose=False)
         saved_ids.append(crop_id)
 
@@ -433,13 +389,11 @@ def flip_horizontal(xyz: np.ndarray, axis: int = 0) -> np.ndarray:
 
 
 def encode_tile_as_crops_augmented(
+    cfg,
     laz_path:   Path,
     out_root:   Path,
     yaw_angles: List[float] = (0, 45, 90, 135, 180, 225, 270, 315),
     flip_axes:  List[int]   = (0, 1),
-    crop_size:  float = CROP_SIZE_M,
-    crop_stride: float = CROP_STRIDE_M,
-    device:     str   = DEVICE,
     verbose:    bool  = False,
 ) -> None:
     """
@@ -461,11 +415,11 @@ def encode_tile_as_crops_augmented(
     dtm_fn   = build_dtm_interpolator(xyz, sem)
     ground_z = dtm_fn(xyz)
     xyz_d    = xyz.copy(); xyz_d[:, 2] -= ground_z
-    crop_origins = _crop_ids(xyz_d, crop_size, crop_stride)
+    crop_origins = _crop_ids(cfg, xyz_d)
 
     for x_start, y_start in crop_origins:
-        xyz_c, sem_c, int_c = _extract_crop(xyz_d, sem, intensity, x_start, y_start, crop_size)
-        if len(xyz_c) < MIN_POINTS_PER_CROP:
+        xyz_c, sem_c, int_c = _extract_crop(cfg, xyz_d, sem, intensity, x_start, y_start)
+        if len(xyz_c) < cfg["min_points_per_crop"]:
             continue
         base_id = f"{tile_id}_x{int(x_start):04d}_y{int(y_start):04d}"
 
@@ -485,8 +439,8 @@ def encode_tile_as_crops_augmented(
                     continue
 
                 save_dir = out_root / f"{base_id}{suffix}"
-                _encode_points(xyz_aug, sem_c, int_c, save_dir,
-                               device=device, verbose=verbose)
+                _encode_points(cfg, xyz_aug, sem_c, int_c, save_dir,
+                               verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +475,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Encode DALES LAZ tiles as 50×50m crops")
+    parser.add_argument("--config", help="Encoding configuration file path")
     parser.add_argument("--tile",  default=None, type=str, help="Tile ID (e.g. 5080_54435)")
     parser.add_argument("--all",   action="store_true",    help="Encode all tiles in --split")
     parser.add_argument("--split", default="train", choices=["train", "test"])
@@ -528,14 +483,17 @@ if __name__ == "__main__":
     parser.add_argument("--export_ply",    action="store_true", help="Export first crop's 256.pt as PLY")
     parser.add_argument("--skip_complete", action="store_true",
                         help="Skip crops that already have all pyramid levels on disk")
-    parser.add_argument("--out",   default=str(GT_ROOT), type=str)
-    parser.add_argument("--device", default=DEVICE, type=str)
-    parser.add_argument("--crop_size", default=CROP_SIZE_M,   type=float)
-    parser.add_argument("--crop_stride", default=CROP_STRIDE_M, type=float)
+    parser.add_argument("--out", type=str)
+    parser.add_argument("--device", default="cuda", type=str)
+    parser.add_argument("--crop_size", type=float)
+    parser.add_argument("--crop_stride", type=float)
     args = parser.parse_args()
 
+    with open(args.config) as f:
+        cfg = json.load(f)
+
     out_root = Path(args.out) / args.split
-    laz_dir  = DALES_ROOT / args.split
+    laz_dir  = Path(cfg["dales_root"]) / args.split
 
     tiles = ([args.tile] if args.tile else
              [p.stem for p in sorted(laz_dir.glob("*.laz"))] if args.all else None)
@@ -548,13 +506,12 @@ if __name__ == "__main__":
             print(f"WARNING: {laz_path} not found, skipping"); continue
 
         crop_ids = encode_tile_as_crops(
-            laz_path, out_root,
-            crop_size=args.crop_size, crop_stride=args.crop_stride,
-            device=args.device, skip_complete=args.skip_complete,
+            cfg, laz_path, out_root,
+            skip_complete=args.skip_complete,
         )
 
         if args.augment:
-            encode_tile_as_crops_augmented(laz_path, out_root, device=args.device)
+            encode_tile_as_crops_augmented(cfg, laz_path, out_root)
 
         if args.export_ply and crop_ids:
             pt = out_root / crop_ids[0] / "256.pt"

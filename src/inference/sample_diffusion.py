@@ -1,12 +1,12 @@
 if True:
     import sys
-    sys.path.append('./src/utils')
+    sys.path.append('./src')
 import argparse
 import glob
 import os
-from fvdb_utils import *
+from utils.fvdb_utils import *
 import pymeshlab as ml
-from diffusion_tensor import DiffusionTensor
+from utils.diffusion_tensor import DiffusionTensor
 import numpy as np
 import torch
 import time
@@ -74,6 +74,11 @@ def compute_canonical_base_grid(
 
 def load_dales_diffusion(level, src):
     """Load a DALES checkpoint: {src}/dales_{level}_*.pt (picks most recent)."""
+    import utils.fvdb_diffusion as _fvdb_diffusion
+    import utils.model as _model
+    # Checkpoints were pickled under old top-level names; remap so unpickling works.
+    sys.modules.setdefault('fvdb_diffusion', _fvdb_diffusion)
+    sys.modules.setdefault('model', _model)
     models = glob.glob('{}/dales_{}*.pt'.format(src, level))
     if not models:
         raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")

@@ -24,8 +24,8 @@ Dataset: `/data/moussabendjilali/archive/data/dales_2/{train,test}/*.laz`
 Encode all training tiles as 50×50m crops (0.2m voxels → 3.2m at coarsest level):
 
 ```shell
-python src/shape_encoding/pc_encoding.py --all --split train
-python src/shape_encoding/pc_encoding.py --all --split test
+python src/encoding/pc_encoding.py --config <config_path> --all --split train
+python src/encoding/pc_encoding.py --config <config_path> --all --split test
 ```
 
 Output: `data/GT_sparse_tensors/dales/{tile_id}_x????_y????/{16,32,64,128,256}.pt`
@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=1 python src/train/train_upsamplers.py \
 Generate 20 unconditional 50×50m crops (4 crops/batch, DDPM):
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/inferance/sample_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/inference/sample_diffusion.py \
     -dataset dales \
     -src checkpoints/diffusion_models \
     -out output/dales \
