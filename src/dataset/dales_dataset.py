@@ -16,6 +16,7 @@ import json
 import random
 from pathlib import Path
 from typing import List, Optional, Tuple
+import numpy as np
 
 import torch
 import fvdb
@@ -102,9 +103,12 @@ class DALESDataset:
             n_common = int(n * self.common_sampling_ratio)
 
             sampled_common = random.sample(common_crop, n_common)
-            sampled_rare = random.choices(weighted_crops, 
-                                          weights=weighted_values, 
-                                          k=n - n_common)
+            sampled_rare = list(
+                np.random.choice(weighted_crops, 
+                                size=n - n_common, 
+                                replace=False,
+                                p=weighted_values)
+            )
             
             sampled_crops = sampled_common + sampled_rare
 
