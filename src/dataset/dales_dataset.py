@@ -90,6 +90,7 @@ class DALESDataset:
             common_crop = []
             weighted_crops = []
             weighted_values = []
+            sampled_crops = []
 
             # 2 groups: common crops (weight=0) and weighted crops (weight>0)
             for crop_dir, weight in zip(crop_dirs, crop_weights):
@@ -110,12 +111,12 @@ class DALESDataset:
                                 p=weighted_values)
             )
             
-            sampled_crops = sampled_common + sampled_rare
+            sampled_crops += sampled_common + sampled_rare
 
             for d in sampled_crops:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
-        print(f"Sampling {len(sampled_crops)} crops among {total_of_crops}.")
+        print(f"Sampling {len(self.crops)} crops among {total_of_crops}.")
 
         if not self.crops:
             raise RuntimeError(
