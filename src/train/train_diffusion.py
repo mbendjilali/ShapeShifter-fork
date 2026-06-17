@@ -129,7 +129,10 @@ def _train_dales(args, cfg, device='cuda'):
     from dataset.dales_dataset import DALESDataset, clip_data_per_element
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
-    dataset = DALESDataset(manifest, split="train",
+
+    dataset = DALESDataset(manifest, 
+                           weights_path=cfg.get("weights_path"),
+                           split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"])
     val_dataset = None

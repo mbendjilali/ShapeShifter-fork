@@ -16,6 +16,7 @@ import json
 import random
 from pathlib import Path
 from typing import List, Optional, Tuple
+import numpy as np
 
 import torch
 import fvdb
@@ -50,10 +51,12 @@ class DALESDataset:
     def __init__(
         self,
         manifest_path: str | Path,
+        weights_path: str | Path,
         split: str = "train",
         upsample_fac: int = 2,
         base_resolution: int = 16,
         sampling_ratio: float = 1.0,
+        common_sampling_ratio: Optional[float] = None,
     ):
         self.upsample_fac = upsample_fac
         self.base_resolution = base_resolution
@@ -64,25 +67,56 @@ class DALESDataset:
         records = manifest[split]
         self.gt_root = Path(manifest.get("gt_root", "data/dales"))
         self.sampling_ratio = manifest.get("sampling_ratio", sampling_ratio) 
+        self.common_sampling_ratio = manifest.get("common_sampling_ratio", common_sampling_ratio)
+        self.weights_path = manifest.get("weights_path", weights_path)
 
         self.crops: List[str] = []       # crop_ids
 
-        total_of_samples = 0
+        with open(self.weights_path) as f:
+            weights_by_tile = json.load(f)
+    
         total_of_crops = 0
         for rec in records:
             tile_id = rec["id"]
             # glob for crops belonging to this tile
+            ##### sorted donc ils sont plus dans le même ordre ?? 
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
-            total_of_crops += len(crop_dirs)
-            if self.sampling_ratio:
-                n = int(len(crop_dirs) * self.sampling_ratio)
-                total_of_samples += n
-                crop_dirs = random.sample(crop_dirs, n)
+            crop_weights = weights_by_tile[split][tile_id]
+            num_zero = sum(w == 0 for w in crop_weights)
+            print(f"{tile_id}: {len(crop_dirs)} crops, min weight={min(crop_weights):.4f}, max weight={max(crop_weights):.4f}, zero weights={num_zero}")
 
-            for d in crop_dirs:
+            total_of_crops += len(crop_dirs)
+
+            common_crop = []
+            weighted_crops = []
+            weighted_values = []
+            sampled_crops = []
+
+            # 2 groups: common crops (weight=0) and weighted crops (weight>0)
+            for crop_dir, weight in zip(crop_dirs, crop_weights):
+                if weight == 0:
+                    common_crop.append(crop_dir)
+                else:
+                    weighted_crops.append(crop_dir)
+                    weighted_values.append(weight)
+
+            n = int(len(crop_dirs) * self.sampling_ratio)
+            n_common = int(n * self.common_sampling_ratio)
+
+            sampled_common = random.sample(common_crop, n_common)
+            sampled_rare = list(
+                np.random.choice(weighted_crops, 
+                                size=n - n_common, 
+                                replace=False,
+                                p=weighted_values)
+            )
+            
+            sampled_crops += sampled_common + sampled_rare
+
+            for d in sampled_crops:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
-        print(f"Sampling {total_of_samples} crops among {total_of_crops}.")
+        print(f"Sampling {len(self.crops)} crops among {total_of_crops}.")
 
         if not self.crops:
             raise RuntimeError(
