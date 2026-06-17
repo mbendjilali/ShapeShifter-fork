@@ -21,7 +21,7 @@
   "sampling_ratio": 0.10,
   "common_sampling_ratio": 0.1,
   "rare_classes": [3, 4, 5, 7],
-  "weights_path": "data/crop_weights.json",
+  "weights_path": "data/dales/crop_weights.json",
   "train": [
     {"id": "5080_54435", "split": "train"},
     {"id": "5085_54320", "split": "train"},

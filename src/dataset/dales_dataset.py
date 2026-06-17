@@ -104,7 +104,6 @@ class DALESDataset:
             sampled_common = random.sample(common_crop, n_common)
             sampled_rare = random.choices(weighted_crops, 
                                           weights=weighted_values, 
-                                          replace = False,
                                           k=n - n_common)
             
             sampled_crops = sampled_common + sampled_rare
