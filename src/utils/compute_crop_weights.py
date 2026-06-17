@@ -15,7 +15,7 @@ def compute_crop_weight(crop_path: str | Path, rare_classes: list[int]):
     rare_points = rare_mask.sum().item()
     total_points = len(point_labels)
 
-    weight = rare_points / total_points
+    weight = rare_points
 
     return weight
 
@@ -46,7 +46,12 @@ def generate_crop_weights(manifest: dict,
                 weight = compute_crop_weight(crop_path, rare_classes)
                 weights.append(weight)
 
-            tile_weights[split][tile_id] = weights
+
+            # sum of all crop weights for this tile
+            total_weights = sum(weights)
+
+            tile_weights[split][tile_id] = [weight / total_weights for weight in weights]
+
 
             with open(output_path, "w") as f:
                 json.dump(tile_weights, f, indent=4)
