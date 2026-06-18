@@ -131,7 +131,6 @@ def _train_dales(args, cfg, device='cuda'):
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
 
     dataset = DALESDataset(manifest, 
-                           weights_path=cfg.get("weights_path"),
                            split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"])
@@ -206,8 +205,8 @@ def _train_dales(args, cfg, device='cuda'):
             loss.backward()
             optimizer.step()
 
-            # Sync CPU↔GPU only every 20 steps — avoids stalling the GPU pipeline
-            if i % 20 == 0:
+            # Sync CPU↔GPU only every 50 steps — avoids stalling the GPU pipeline
+            if i % 50 == 0:
                 loss_val = loss.item()
                 LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
                 L.append(LOSS_EMA)

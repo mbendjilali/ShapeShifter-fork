@@ -51,7 +51,6 @@ class DALESDataset:
     def __init__(
         self,
         manifest_path: str | Path,
-        weights_path: str | Path,
         split: str = "train",
         upsample_fac: int = 2,
         base_resolution: int = 16,
@@ -68,7 +67,7 @@ class DALESDataset:
         self.gt_root = Path(manifest.get("gt_root", "data/dales"))
         self.sampling_ratio = manifest.get("sampling_ratio", sampling_ratio) 
         self.common_sampling_ratio = manifest.get("common_sampling_ratio", common_sampling_ratio)
-        self.weights_path = manifest.get("weights_path", weights_path)
+        self.weights_path = manifest.get("weights_path")
 
         self.crops: List[str] = []       # crop_ids
 
@@ -82,36 +81,37 @@ class DALESDataset:
             ##### sorted donc ils sont plus dans le même ordre ?? 
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
             crop_weights = weights_by_tile[split][tile_id]
-            num_zero = sum(w == 0 for w in crop_weights)
-            print(f"{tile_id}: {len(crop_dirs)} crops, min weight={min(crop_weights):.4f}, max weight={max(crop_weights):.4f}, zero weights={num_zero}")
+            crop_dirs = [crop_dirs[i] for i in range(len(crop_dirs)) if crop_weights[i] > 0.01]
+            # print(f"{tile_id}: {len(crop_dirs)} crops, min weight={min(crop_weights):.4f}, max weight={max(crop_weights):.4f}, zero weights={num_zero}")
 
             total_of_crops += len(crop_dirs)
 
-            common_crop = []
-            weighted_crops = []
-            weighted_values = []
-            sampled_crops = []
+            # common_crop = []
+            # weighted_crops = []
+            # weighted_values = []
+            # sampled_crops = []
 
             # 2 groups: common crops (weight=0) and weighted crops (weight>0)
-            for crop_dir, weight in zip(crop_dirs, crop_weights):
-                if weight == 0:
-                    common_crop.append(crop_dir)
-                else:
-                    weighted_crops.append(crop_dir)
-                    weighted_values.append(weight)
+            # for crop_dir, weight in zip(crop_dirs, crop_weights):
+            #     if weight == 0:
+            #         common_crop.append(crop_dir)
+            #     else:
+            #         weighted_crops.append(crop_dir)
+            #         weighted_values.append(weight)
 
-            n = int(len(crop_dirs) * self.sampling_ratio)
-            n_common = int(n * self.common_sampling_ratio)
 
-            sampled_common = random.sample(common_crop, n_common)
-            sampled_rare = list(
-                np.random.choice(weighted_crops, 
-                                size=n - n_common, 
-                                replace=False,
-                                p=weighted_values)
-            )
+            # n = int(len(crop_dirs) * self.sampling_ratio)
+            # n_common = int(n * self.common_sampling_ratio)
+
+            # sampled_common = random.sample(common_crop, n_common)
+            # sampled_rare = list(
+            #     np.random.choice(weighted_crops, 
+            #                     size=n - n_common, 
+            #                     replace=False,
+            #                     p=weighted_values)
+            # )
             
-            sampled_crops += sampled_common + sampled_rare
+            sampled_crops = random.sample(crop_dirs, int(len(crop_dirs) * self.sampling_ratio))
 
             for d in sampled_crops:
                 if (d / f"{base_resolution}.pt").exists():

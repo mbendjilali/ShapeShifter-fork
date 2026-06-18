@@ -19,9 +19,8 @@
     "8": "Buildings"
   },
   "rare_classes": [3, 4, 5, 7],
-  "sampling_ratio": 0.10,
+  "sampling_ratio": 0.90,
   "common_sampling_ratio": 0.1,
-  "rare_classes": [3, 4, 5, 7],
   "weights_path": "data/dales/crop_weights.json",
   "train": [
     {"id": "5080_54435", "split": "train"},
