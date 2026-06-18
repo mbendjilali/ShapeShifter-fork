@@ -20,8 +20,7 @@
     "7": "Poles",
     "8": "Buildings"
   },
-  "rare_classes": [3, 4, 5, 7],
-  "vegetation_class": 2,
+  "rare_classes": [3, 4, 5, 7, 8],
   "sampling_ratio": 0.90,
   "common_sampling_ratio": 0.1,
   "weights_path": "data/dales/crop_weights.json",
