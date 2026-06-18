@@ -2,12 +2,14 @@
   "dales_root": "/data/moussabendjilali/archive/data/dales_2",
   "gt_root": "data/dales",
   "voxel_size_levels": {
-    "256": 0.2,
-    "128": 0.4,
-    "64": 0.8,
-    "32": 1.6,
-    "16": 3.2
+    "512": 0.2,
+    "256": 0.4,
+    "128": 0.8,
+    "64": 1.6,
+    "32": 3.2,
+    "16": 6.4
   },
+  "ground_class": 1,
   "classes": {
     "1": "Ground",
     "2": "Vegetation",
