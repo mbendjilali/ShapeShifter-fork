@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 import fvdb.nn as fvnn
 import argparse
+import math
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.nn as nn
@@ -177,55 +178,66 @@ def _train_dales(args, cfg, device='cuda'):
         model_upsampler=model_upsampler,
     ).cuda()
 
+    n_epochs = cfg["epochs"]
+    batch_size = cfg["batch_size"]
+    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    save_every = cfg["save_every"]
+    val_every  = cfg.get("val_every", save_every)
+
+    print(f"  {len(dataset)} crops — {steps_per_epoch} steps/epoch — "
+          f"{n_epochs} epochs ({n_epochs * steps_per_epoch} total steps)")
+
     L, VAL_L = [], []
     LOSS_EMA = None
     current_time = datetime.today().strftime('%d-%m-%H:%M')
 
     loader = _PrefetchLoader(
-        dataset, "train", args.level, cfg["batch_size"], device, capacity=2
+        dataset, "train", args.level, batch_size, device, capacity=2
     ).start()
 
     try:
-        for i in tqdm(range(cfg["epochs"])):
-            optimizer.zero_grad()
-            batch = loader.next()
+        for epoch in tqdm(range(n_epochs), desc="Epochs"):
+            epoch_loss_sum = 0.0
 
-            if args.level == 0:
-                X0   = batch
-                loss = diffusion(X0)
-            else:
-                X, X_UP, X0 = batch
-                with torch.no_grad():
-                    X0_BLUR = model_upsampler(X, X_UP).detach()
-                X0_BLUR.grid = X0.grid
-                x0c, bc = clip_data_per_element(X0, X0_BLUR, cfg["clip_size"])
-                loss = diffusion(x0c, bc)
+            for _ in range(steps_per_epoch):
+                optimizer.zero_grad()
+                batch = loader.next()
 
-            torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
-            loss.backward()
-            optimizer.step()
+                if args.level == 0:
+                    X0   = batch
+                    loss = diffusion(X0)
+                else:
+                    X, X_UP, X0 = batch
+                    with torch.no_grad():
+                        X0_BLUR = model_upsampler(X, X_UP).detach()
+                    X0_BLUR.grid = X0.grid
+                    x0c, bc = clip_data_per_element(X0, X0_BLUR, cfg["clip_size"])
+                    loss = diffusion(x0c, bc)
 
-            # Sync CPU↔GPU only every 50 steps — avoids stalling the GPU pipeline
-            if i % 50 == 0:
-                loss_val = loss.item()
-                LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
-                L.append(LOSS_EMA)
+                torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
+                loss.backward()
+                optimizer.step()
+                epoch_loss_sum += loss.item()
 
-            val_every = cfg.get("val_every", cfg["save_every"])
-            if val_dataset is not None and i % val_every == 0:
+            epoch_loss = epoch_loss_sum / steps_per_epoch
+            LOSS_EMA = epoch_loss if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * epoch_loss
+            L.append(LOSS_EMA)
+
+            if val_dataset is not None and epoch % val_every == 0:
                 val_loss = val_dataset.compute_val_loss(
                     diffusion, "test", args.level, n_crops=4,
                     clip_size=cfg["clip_size"], device=device,
                 )
                 if val_loss is not None:
-                    VAL_L.append((i, val_loss))
+                    VAL_L.append((epoch, val_loss))
 
-            if i % cfg["save_every"] == 0 or i == cfg["epochs"] - 1:
+            if epoch % save_every == 0 or epoch == n_epochs - 1:
                 plt.clf()
                 plt.plot(L, label='train_ema')
                 if VAL_L:
                     plt.plot([v[0] for v in VAL_L], [v[1] for v in VAL_L],
                              label='val', linestyle='--')
+                plt.xlabel('epoch')
                 plt.yscale('log')
                 plt.legend()
                 plt.savefig('checkpoints/diffusion_models/dales_{}_{}.png'.format(

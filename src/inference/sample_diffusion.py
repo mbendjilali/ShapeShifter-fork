@@ -29,9 +29,9 @@ def compute_canonical_base_grid(
     """
     DALES unconditional sampling: a fully-occupied dense base grid.
 
-    At level 0 for 50×50m crops (base_res=16, voxel_size=3.2m):
-      - XY: 16 × 16 voxels (51.2m)
-      - Z:  nz voxels (default: ceil(MAX_HEIGHT_M / voxel_size) = ceil(50/3.2) = 16)
+    At level 0 for 100×100m crops (base_res=16, voxel_size=6.25m):
+      - XY: 16 × 16 voxels (100m)
+      - Z:  nz voxels (default: ceil(50m / voxel_size) = ceil(50/6.25) = 8)
 
     All voxels start active (mask=+1); the diffusion model prunes via the mask
     channel during sampling.
@@ -41,14 +41,13 @@ def compute_canonical_base_grid(
     base_res : int
         Number of voxels in X and Y (default 16).
     extent_m : float
-        Physical XY extent of one crop in metres (default 50.0 for DALES crops).
+        Physical XY extent of one crop in metres (default 100.0 for DALES crops).
     batch : int
         Batch size (number of independent samples).
     device : str
     nz : int | None
-        Number of voxels in Z. Defaults to ceil(50 / voxel_size) = base_res
-        when voxel_size = extent_m / base_res, which gives an isotropic grid.
-        Pass 12 for DALES crops (covers 0..38.4m above ground at 3.2m/voxel).
+        Number of voxels in Z. Defaults to base_res (isotropic grid).
+        Pass 8 for 100×100m DALES crops (covers 0..50m above ground at 6.25m/voxel).
 
     Returns
     -------
@@ -91,19 +90,20 @@ def load_dales_diffusion(level, src):
 def compute_all_generations_dales(
     src,
     base_res=16,
-    extent_m=50.0,
+    extent_m=100.0,
     max_level=4,
     eval_batch_size=5,
     features=10,
     ddim_steps=None,
     verbose=False,
-    nz=12,
+    nz=8,
 ):
     """
     Unconditional DALES generation: noise → level 0 → … → level max_level.
 
     Uses compute_canonical_base_grid instead of a stored crop grid.
-    For 50×50m crops: extent_m=50.0, base_res=16, nz=12 (covers 0..38.4m at 3.2m/voxel).
+    For 100×100m crops: extent_m=100.0, base_res=16, nz=8
+      (voxel_size=6.25m, covers 0..50m at level 0).
     Export point clouds with save_generation_pc.
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -122,12 +122,16 @@ def compute_all_generations_dales(
             noisy_init, steps=diffusion0.max_T // ddim_steps)
 
     generated_X = DiffusionTensor.from_vdb(generated_X).remove_mask()
+    del diffusion0
+    torch.cuda.empty_cache()
     generated_Xs = [generated_X]
     if verbose:
         print('LEVEL 0: {:.1f}s'.format(time.time() - t0))
 
     for i in range(1, max_level + 1):
         generated_X = generate_level_dales(generated_X, i, src, ddim_steps, verbose)
+        # move previous level off GPU before accumulating the new one
+        generated_Xs[-1] = generated_Xs[-1].cpu()
         generated_Xs.append(generated_X)
 
     return generated_Xs
@@ -145,7 +149,10 @@ def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False
         generated_X = diffusion.ddim_sample(new_XT, steps=diffusion.max_T // ddim_steps)
     if verbose:
         print('LEVEL {}: {:.1f}s'.format(level, time.time() - t0))
-    return DiffusionTensor.from_vdb(generated_X).remove_mask()
+    result = DiffusionTensor.from_vdb(generated_X).remove_mask()
+    del diffusion
+    torch.cuda.empty_cache()
+    return result
 
 
 def load_diffusion(example_mesh_name, level, src):
@@ -317,8 +324,8 @@ if __name__ == '__main__':
     parser.add_argument('-total_num', default=20, type=int,
                         help='Total number of crops to generate')
     parser.add_argument('-base_res', default=16, type=int)
-    parser.add_argument('-nz', default=12, type=int,
-                        help='Z voxels at level 0 (DALES: 12 → covers 0..38.4m at 3.2m/vox)')
+    parser.add_argument('-nz', default=8, type=int,
+                        help='Z voxels at level 0 (DALES 100m crops: 8 → covers 0..50m at 6.25m/vox)')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

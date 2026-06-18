@@ -10,7 +10,7 @@ layers: 3
 first_ks: 3
 one_layers: 6
 features: 256
-epochs: 5000
+epochs: 500
 
 lr: 0.0001
 batch_size: 4
@@ -19,5 +19,5 @@ clip_size: 20   # unused at level 0 but kept for consistency
 dropout: 0.05
 time_emb: 6
 diffusion_timesteps: 1000
-save_every: 500
-val_every: 2000
+save_every: 50
+val_every: 100

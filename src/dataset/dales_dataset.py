@@ -88,12 +88,14 @@ class DALESDataset:
 
             # build name → vegetation weight lookup before any reordering
             if veg_weights_by_tile is not None:
-                raw_veg = veg_weights_by_tile[split][tile_id]
+                raw_veg = veg_weights_by_tile.get(split, {}).get(tile_id, [])
                 veg_weight_for = {d.name: raw_veg[i] for i, d in enumerate(crop_dirs) if i < len(raw_veg)}
             else:
                 veg_weight_for = {}
 
-            crop_weights = weights_by_tile[split][tile_id]
+            crop_weights = weights_by_tile.get(split, {}).get(tile_id)
+            if crop_weights is None or len(crop_weights) == 0:
+                crop_weights = [1.0] * len(crop_dirs)
             crop_dirs_weights = list(zip(crop_dirs, crop_weights))
             crop_dirs_weights.sort(key=lambda x: x[1], reverse=True)
             crop_dirs, crop_weights = zip(*crop_dirs_weights) if crop_dirs_weights else ([], [])
