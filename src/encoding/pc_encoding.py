@@ -207,15 +207,19 @@ def aggregate_voxels(
     mean_height    = scatter_mean_1d(height)
 
     # majority vote for semantic class
+    encoding_factors = torch.tensor([1.0, 0.3, 1.0, 1.0, 1.0, 0.8, 1.0, 1.0])
     sem_t  = torch.tensor(sem.astype(np.int64) - 1, dtype=torch.long)
+    # create a vector of one-hot encodings for each point and multiply by the corresponding encoding factor
     oh     = torch.zeros(N, cfg["n_classes"])
     oh.scatter_(1, sem_t.unsqueeze(1), 1.0)
+    oh     = oh * encoding_factors
+    # sum the weighted one-hot vectors for each voxel
     cc     = torch.zeros(V, cfg["n_classes"]).scatter_add_(
         0, vids.unsqueeze(1).expand(-1, cfg["n_classes"]), oh)
+    # majority vote
     class_norm = (cc.argmax(1).float() / max(cfg["n_classes"] - 1, 1)).numpy().astype(np.float32)
 
     return grid, mean_xyz, normals, mean_intensity, mean_height, class_norm
-
 
 # ---------------------------------------------------------------------------
 # PoNQ → DiffusionTensor
