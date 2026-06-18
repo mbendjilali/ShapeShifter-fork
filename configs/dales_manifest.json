@@ -21,52 +21,17 @@
     "8": "Buildings"
   },
   "rare_classes": [3, 4, 5, 7],
+  "vegetation_class": 2,
   "sampling_ratio": 0.90,
   "common_sampling_ratio": 0.1,
   "weights_path": "data/dales/crop_weights.json",
+  "vegetation_weights_path": "data/dales/crop_vegetation_weights.json",
   "train": [
-    {"id": "5080_54435", "split": "train"},
-    {"id": "5085_54320", "split": "train"},
-    {"id": "5095_54440", "split": "train"},
-    {"id": "5095_54455", "split": "train"},
-    {"id": "5100_54495", "split": "train"},
-    {"id": "5105_54405", "split": "train"},
-    {"id": "5105_54460", "split": "train"},
-    {"id": "5110_54320", "split": "train"},
-    {"id": "5110_54460", "split": "train"},
-    {"id": "5110_54475", "split": "train"},
-    {"id": "5110_54495", "split": "train"},
-    {"id": "5115_54480", "split": "train"},
-    {"id": "5130_54355", "split": "train"},
-    {"id": "5135_54495", "split": "train"},
-    {"id": "5140_54445", "split": "train"},
-    {"id": "5145_54340", "split": "train"},
-    {"id": "5145_54405", "split": "train"},
-    {"id": "5145_54460", "split": "train"},
-    {"id": "5145_54470", "split": "train"},
-    {"id": "5145_54480", "split": "train"},
-    {"id": "5150_54340", "split": "train"},
-    {"id": "5160_54330", "split": "train"},
-    {"id": "5165_54390", "split": "train"},
-    {"id": "5165_54395", "split": "train"},
-    {"id": "5180_54435", "split": "train"},
-    {"id": "5180_54485", "split": "train"},
-    {"id": "5185_54390", "split": "train"},
-    {"id": "5185_54485", "split": "train"},
-    {"id": "5190_54400", "split": "train"}
+
+    {"id": "5100_54495", "split": "train"}
   ],
   "test": [
-    {"id": "5080_54400", "split": "test"},
-    {"id": "5080_54470", "split": "test"},
-    {"id": "5100_54440", "split": "test"},
-    {"id": "5100_54490", "split": "test"},
-    {"id": "5120_54445", "split": "test"},
-    {"id": "5135_54430", "split": "test"},
-    {"id": "5135_54435", "split": "test"},
-    {"id": "5140_54390", "split": "test"},
-    {"id": "5150_54325", "split": "test"},
-    {"id": "5155_54335", "split": "test"},
-    {"id": "5175_54395", "split": "test"}
+    {"id": "5100_54495", "split": "train"}
   ]
 }
 

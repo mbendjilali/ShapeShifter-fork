@@ -5,7 +5,7 @@ Discovery: for each tile in the manifest, scans gt_root for directories matching
   {tile_id}_x????_y????/ that contain {base_resolution}.pt.
 Each such directory is an independent crop sample (50×50m).
 
-Sampling: weighted by rare-class presence (inherited from tile-level metadata).
+Sampling: weighted by inverse vegetation fraction (crops with less vegetation are sampled more often).
 
 Batching: fvdb.jcat of heterogeneous sparse grids.
 """
@@ -69,54 +69,52 @@ class DALESDataset:
         self.common_sampling_ratio = manifest.get("common_sampling_ratio", common_sampling_ratio)
         self.weights_path = manifest.get("weights_path")
 
-        self.crops: List[str] = []       # crop_ids
+        self.crops: List[str] = []
+        self.crop_sampling_weights: List[float] = []
 
         with open(self.weights_path) as f:
             weights_by_tile = json.load(f)
-    
+
+        vegetation_weights_path = manifest.get("vegetation_weights_path")
+        veg_weights_by_tile = None
+        if vegetation_weights_path and Path(vegetation_weights_path).exists():
+            with open(vegetation_weights_path) as f:
+                veg_weights_by_tile = json.load(f)
+
         total_of_crops = 0
         for rec in records:
             tile_id = rec["id"]
-            # glob for crops belonging to this tile
-            ##### sorted donc ils sont plus dans le même ordre ?? 
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
+
+            # build name → vegetation weight lookup before any reordering
+            if veg_weights_by_tile is not None:
+                raw_veg = veg_weights_by_tile[split][tile_id]
+                veg_weight_for = {d.name: raw_veg[i] for i, d in enumerate(crop_dirs) if i < len(raw_veg)}
+            else:
+                veg_weight_for = {}
+
             crop_weights = weights_by_tile[split][tile_id]
-            crop_dirs = [crop_dirs[i] for i in range(len(crop_dirs)) if crop_weights[i] > 0.01]
-            # print(f"{tile_id}: {len(crop_dirs)} crops, min weight={min(crop_weights):.4f}, max weight={max(crop_weights):.4f}, zero weights={num_zero}")
+            crop_dirs_weights = list(zip(crop_dirs, crop_weights))
+            crop_dirs_weights.sort(key=lambda x: x[1], reverse=True)
+            crop_dirs, crop_weights = zip(*crop_dirs_weights) if crop_dirs_weights else ([], [])
+            crop_dirs = list(crop_dirs)
 
             total_of_crops += len(crop_dirs)
 
-            # common_crop = []
-            # weighted_crops = []
-            # weighted_values = []
-            # sampled_crops = []
-
-            # 2 groups: common crops (weight=0) and weighted crops (weight>0)
-            # for crop_dir, weight in zip(crop_dirs, crop_weights):
-            #     if weight == 0:
-            #         common_crop.append(crop_dir)
-            #     else:
-            #         weighted_crops.append(crop_dir)
-            #         weighted_values.append(weight)
-
-
-            # n = int(len(crop_dirs) * self.sampling_ratio)
-            # n_common = int(n * self.common_sampling_ratio)
-
-            # sampled_common = random.sample(common_crop, n_common)
-            # sampled_rare = list(
-            #     np.random.choice(weighted_crops, 
-            #                     size=n - n_common, 
-            #                     replace=False,
-            #                     p=weighted_values)
-            # )
-            
-            sampled_crops = random.sample(crop_dirs, int(len(crop_dirs) * self.sampling_ratio))
+            n = int(len(crop_dirs) * self.sampling_ratio)
+            sampled_crops = crop_dirs[:n]
 
             for d in sampled_crops:
                 if (d / f"{base_resolution}.pt").exists():
-                    self.crops.append(d.name)   # e.g. "5080_54435_x0000_y0050"
-        print(f"Sampling {len(self.crops)} crops among {total_of_crops}.")
+                    self.crops.append(d.name)
+                    self.crop_sampling_weights.append(veg_weight_for.get(d.name, 1.0))
+
+        if not self.crops:
+            pass  # RuntimeError raised below
+
+        using_veg = veg_weights_by_tile is not None
+        print(f"Sampling {len(self.crops)} crops among {total_of_crops}."
+              + (" (vegetation-biased sampling)" if using_veg else " (uniform sampling)"))
 
         if not self.crops:
             raise RuntimeError(
@@ -158,8 +156,8 @@ class DALESDataset:
         return X, X_UP, X0
 
     def sample_crop_ids(self, batch_size: int) -> List[str]:
-        """Sample batch_size crop IDs (with replacement, weighted)."""
-        return random.choices(self.crops, k=batch_size)
+        """Sample batch_size crop IDs with replacement, biased toward low-vegetation crops."""
+        return random.choices(self.crops, weights=self.crop_sampling_weights, k=batch_size)
 
     def sample_batch(
         self,
