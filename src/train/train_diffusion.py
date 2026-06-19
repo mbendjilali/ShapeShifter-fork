@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 import fvdb.nn as fvnn
 import argparse
+import math
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.nn as nn
@@ -134,13 +135,11 @@ def _train_dales(args, cfg, device='cuda'):
                            split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"])
-    val_dataset = None
-    try:
-        val_dataset = DALESDataset.test_set(manifest, split="test",
-                                             upsample_fac=cfg["upsample_fac"],
-                                             base_resolution=cfg["base_resolution"])
-    except Exception:
-        pass  # no test tiles encoded yet
+
+    val_dataset = DALESDataset.test_set(manifest,
+                                        upsample_fac=cfg["upsample_fac"],
+                                        base_resolution=cfg["base_resolution"])
+
 
     # Determine channel count from first available crop
     first_crop = dataset.crops[0]
@@ -173,69 +172,98 @@ def _train_dales(args, cfg, device='cuda'):
         model,
         timesteps=cfg["diffusion_timesteps"],
         max_T=cfg.get("max_T", None) if args.level > 0 else None,
-        loss=nn.functional.mse_loss,
+        n_classes = cfg["n_classes"],
         model_upsampler=model_upsampler,
     ).cuda()
 
-    L, VAL_L = [], []
-    LOSS_EMA = None
+    n_epochs = cfg["epochs"]
+    batch_size = cfg["batch_size"]
+    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    save_every = cfg["save_every"]
+    val_every  = cfg.get("val_every", save_every)
+
+    print(f"  {len(dataset)} crops — {steps_per_epoch} steps/epoch — "
+          f"{n_epochs} epochs ({n_epochs * steps_per_epoch} total steps)")
+
+    MSE_L, BCE_L, VAL_MSE_L, VAL_BCE_L = [], [], [], []
+    MSE_LOSS_EMA = None
+    BCE_LOSS_EMA = None
     current_time = datetime.today().strftime('%d-%m-%H:%M')
 
     loader = _PrefetchLoader(
-        dataset, "train", args.level, cfg["batch_size"], device, capacity=2
+        dataset, "train", args.level, batch_size, device, capacity=2
     ).start()
 
     try:
-        for i in tqdm(range(cfg["epochs"])):
-            optimizer.zero_grad()
-            batch = loader.next()
+        from tqdm import trange
 
-            if args.level == 0:
-                X0   = batch
-                loss = diffusion(X0)
-            else:
-                X, X_UP, X0 = batch
-                with torch.no_grad():
-                    X0_BLUR = model_upsampler(X, X_UP).detach()
-                X0_BLUR.grid = X0.grid
-                x0c, bc = clip_data_per_element(X0, X0_BLUR, cfg["clip_size"])
-                loss = diffusion(x0c, bc)
+        for epoch in trange(n_epochs, desc="Epochs"):
+            epoch_mse_loss_sum = 0.0
+            epoch_bce_loss_sum = 0.0
 
-            torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
-            loss.backward()
-            optimizer.step()
+            for _ in range(steps_per_epoch):
+                optimizer.zero_grad()
+                batch = loader.next()
 
-            # Sync CPU↔GPU only every 50 steps — avoids stalling the GPU pipeline
-            if i % 50 == 0:
-                loss_val = loss.item()
-                LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
-                L.append(LOSS_EMA)
+                if args.level == 0:
+                    X0   = batch
+                    mse_loss, bce_loss = diffusion(X0)
+                else:
+                    X, X_UP, X0 = batch
+                    with torch.no_grad():
+                        X0_BLUR = model_upsampler(X, X_UP).detach()
+                    X0_BLUR.grid = X0.grid
+                    x0c, bc = clip_data_per_element(X0, X0_BLUR, cfg["clip_size"])
+                    mse_loss, bce_loss = diffusion(x0c, bc)
 
-            val_every = cfg.get("val_every", cfg["save_every"])
-            if val_dataset is not None and i % val_every == 0:
-                val_loss = val_dataset.compute_val_loss(
+                loss = mse_loss + bce_loss
+                torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
+                loss.backward()
+                optimizer.step()
+                epoch_mse_loss_sum += mse_loss.item()
+                epoch_bce_loss_sum += bce_loss.item()
+
+            epoch_mse_loss = epoch_mse_loss_sum / steps_per_epoch
+            epoch_bce_loss = epoch_bce_loss_sum / steps_per_epoch
+            MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
+            BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
+            MSE_L.append(MSE_LOSS_EMA)
+            BCE_L.append(BCE_LOSS_EMA)
+
+            if val_dataset is not None and epoch % val_every == 0:
+                val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
                     diffusion, "test", args.level, n_crops=4,
                     clip_size=cfg["clip_size"], device=device,
                 )
-                if val_loss is not None:
-                    VAL_L.append((i, val_loss))
+                if val_mse_loss is not None:
+                    VAL_MSE_L.append((epoch, val_mse_loss.item()))
+                if val_bce_loss is not None:
+                    VAL_BCE_L.append((epoch, val_bce_loss.item()))
 
-            if i % cfg["save_every"] == 0 or i == cfg["epochs"] - 1:
+            # Update tqdm with current losses
+            tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" +
+                       (f", val_loss={val_mse_loss + val_bce_loss:.4f}" if val_dataset is not None else ""))
+
+            if epoch % save_every == 0 or epoch == n_epochs - 1:
                 plt.clf()
-                plt.plot(L, label='train_ema')
-                if VAL_L:
-                    plt.plot([v[0] for v in VAL_L], [v[1] for v in VAL_L],
-                             label='val', linestyle='--')
+                plt.plot(MSE_L, label='train_mse_ema')
+                if VAL_MSE_L:
+                    plt.plot([v[0] for v in VAL_MSE_L], [v[1] for v in VAL_MSE_L],
+                             label='MSE', linestyle='--')
+                if VAL_BCE_L:
+                    plt.plot([v[0] for v in VAL_BCE_L], [v[1] for v in VAL_BCE_L],
+                             label='BCE', linestyle='--')
+                plt.xlabel('epoch')
                 plt.yscale('log')
                 plt.legend()
-                plt.savefig('checkpoints/diffusion_models/dales_{}_{}.png'.format(
+                plt.savefig('checkpoints/diffusion_models/dales_loss_{}_{}.png'.format(
                     args.level, current_time))
     finally:
         loader.stop()
 
-    ckpt = 'checkpoints/diffusion_models/dales_{}_{}.pt'.format(args.level, current_time)
-    torch.save(diffusion, ckpt)
-    print(ckpt)
+        ckpt = 'checkpoints/diffusion_models/dales_{}_{}.pt'.format(args.level, current_time)
+        torch.save(diffusion, ckpt)
+        print(ckpt)
 
 
 # ---------------------------------------------------------------------------

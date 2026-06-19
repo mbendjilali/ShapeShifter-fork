@@ -43,7 +43,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         max_T=None,
         noise_schedule='cosine',
         time_difference=0.,
-        loss=F.mse_loss,
+        n_classes=None,
         model_upsampler=None,
     ):
         super().__init__()
@@ -65,7 +65,8 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # proposed in the paper, summed to time_next
         # as a way to fix a deficiency in self-conditioning and lower FID when the number of sampling timesteps is < 400
         self.time_difference = time_difference
-        self.loss = loss
+        self.MSEloss = nn.functional.mse_loss
+        self.BCEloss = nn.functional.binary_cross_entropy_with_logits
 
     @property
     def device(self):
@@ -191,6 +192,14 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         noisy_latents, target_X = self.q_sample(X, times, X_Blur)
 
         # prediction
-        pred = self.model(noisy_latents, times)
+        pred: fvnn.VDBTensor = self.model(noisy_latents, times)
+        
+        mse_pred = torch.cat([pred.jdata[:, :5], pred.jdata[:, -1:]], dim=1)
+        mse_target = torch.cat([X.jdata[:, :5], X.jdata[:, -1:]], dim=1)
+        mse_loss = self.MSEloss(mse_pred, mse_target)
+
+        class_pred = pred.jdata[:, 5:-1]
+        class_target = X.jdata[:, 5:-1]
+        class_loss = self.BCEloss(class_pred, class_target)
         # return self.loss(pred.jdata, target_X)
-        return self.loss(pred.jdata, X.jdata)
+        return mse_loss, class_loss

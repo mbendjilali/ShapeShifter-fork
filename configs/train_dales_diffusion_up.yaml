@@ -11,7 +11,7 @@ layers: 2
 first_ks: 3
 one_layers: 4
 features: 128
-epochs: 30000
+epochs: 100
 
 lr: 0.0001
 batch_size: 2
@@ -21,5 +21,5 @@ dropout: 0.05
 time_emb: 6
 diffusion_timesteps: 1000
 max_T: 500
-save_every: 500
-val_every: 2000
+save_every: 30
+val_every: 60

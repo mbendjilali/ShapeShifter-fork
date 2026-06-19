@@ -18,6 +18,7 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     Checkpoints: checkpoints/upsamplers/dales_{level}.pt
     """
     from dataset.dales_dataset import DALESDataset
+    import math
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
     dataset = DALESDataset(manifest, split="train",
@@ -32,20 +33,28 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
         cfg["layers"], cfg["upsample_fac"], cfg["dropout"]
     ).to(device)
     optimizer = torch.optim.AdamW(model_upsampler.parameters(), lr=cfg["lr"])
+
+    n_epochs = cfg["epochs"]
+    batch_size = cfg.get("batch_size", 1)
+    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    print(f"  {len(dataset)} crops — {steps_per_epoch} steps/epoch — {n_epochs} epochs")
+
     L = []
     LOSS_EMA = None
     count_parameters(model_upsampler)
 
-    for i in tqdm(range(cfg["epochs"])):
-        optimizer.zero_grad()
-        X, X_UP, Y = dataset.sample_batch("train", args.level, cfg.get("batch_size", 1), device)
-        loss = (((model_upsampler(X, X_UP) - Y).jdata) ** 2).mean()
-        loss.backward()
-        optimizer.step()
-        if i % 20 == 0:
-            loss_val = loss.item()
-            LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
-            L.append(LOSS_EMA)
+    for epoch in tqdm(range(n_epochs), desc="Epochs"):
+        epoch_loss_sum = 0.0
+        for _ in range(steps_per_epoch):
+            optimizer.zero_grad()
+            X, X_UP, Y = dataset.sample_batch("train", args.level, batch_size, device)
+            loss = (((model_upsampler(X, X_UP) - Y).jdata) ** 2).mean()
+            loss.backward()
+            optimizer.step()
+            epoch_loss_sum += loss.item()
+        loss_val = epoch_loss_sum / steps_per_epoch
+        LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
+        L.append(LOSS_EMA)
 
     plt.plot(L, label='dales_{}'.format(args.level))
     plt.yscale('log')
