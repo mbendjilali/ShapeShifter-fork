@@ -215,24 +215,23 @@ class DALESDataset:
         if not self.crops:
             return None
         sample_ids = random.sample(self.crops, min(n_crops, len(self.crops)))
-        losses = []
+        mse_losses = []
+        bce_losses = []
         for crop_id in sample_ids:
-            try:
-                if level == 0:
-                    X0 = self.load_crop_level0(split, crop_id, device)
-                    with torch.no_grad():
-                        loss = diffusion(X0).item()
-                else:
-                    X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
-                    with torch.no_grad():
-                        X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
-                        X0_BLUR.grid = X0.grid
-                        x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
-                        loss = diffusion(x0c, blurc).item()
-                losses.append(loss)
-            except Exception:
-                pass
-        return sum(losses) / len(losses) if losses else None
+            if level == 0:
+                X0 = self.load_crop_level0(split, crop_id, device)
+                with torch.no_grad():
+                    mse_loss, bce_loss = diffusion(X0)
+            else:
+                X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
+                with torch.no_grad():
+                    X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
+                    X0_BLUR.grid = X0.grid
+                    x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
+                    mse_loss, bce_loss = diffusion(x0c, blurc)
+            mse_losses.append(mse_loss)
+            bce_losses.append(bce_loss)
+        return sum(mse_losses) / len(mse_losses), sum(bce_losses) / len(bce_losses)
 
     # ------------------------------------------------------------------
     # Debug / stats

@@ -56,7 +56,7 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
 
     @staticmethod
     def get_feature_data(jdata):
-        """Returns (offset, features, mask) where features = [intensity, height, class_probs(8)]."""
+        """Returns (offset, features, mask) where features = [intensity, height, class_probs]."""
         offset = jdata[:, :3]
         features = jdata[:, 3:-1]
         mask   = jdata[:, -1:]

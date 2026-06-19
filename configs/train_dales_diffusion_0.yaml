@@ -10,7 +10,9 @@ layers: 3
 first_ks: 3
 one_layers: 6
 features: 256
-epochs: 150
+epochs: 100
+
+n_classes: 8
 
 lr: 0.0001
 batch_size: 4
@@ -20,4 +22,4 @@ dropout: 0.05
 time_emb: 6
 diffusion_timesteps: 1000
 save_every: 10
-val_every: 25
+val_every: 2
