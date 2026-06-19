@@ -52,16 +52,17 @@ def get_square_Qs(flat_As):
 
 
 class PoNQ_grid:
-    def __init__(self, grid_size: int) -> None:
+    def __init__(self, grid_size: int, class_dim: int = None) -> None:
         self.grid = None
         self.Qs = None
         self.normals = None
-        self.colors = None
+        self.classes = None
         self.grid_size = grid_size
+        self.class_dim = class_dim
 
     @property
     def feature(self) -> fvdb.JaggedTensor:
-        return fvdb.JaggedTensor(torch.cat((get_flat_Qs(self.Qs), self.normals, self.colors), -1))
+        return fvdb.JaggedTensor(torch.cat((get_flat_Qs(self.Qs), self.normals, self.classes), -1))
 
     @property
     def voxel_centers(self) -> fvdb.JaggedTensor:
@@ -69,11 +70,11 @@ class PoNQ_grid:
 
     def from_feature(self, grid, feature):
         self.grid = grid
-        self.Qs = get_square_Qs(feature.jdata[:, :-6])
-        self.normals = feature.jdata[:, -6:-3]
-        self.colors = feature.jdata[:, -3:]
+        self.Qs = get_square_Qs(feature.jdata[:, :-(3 + self.class_dim)])
+        self.normals = feature.jdata[:, -(3 + self.class_dim):-self.class_dim]
+        self.classes = feature.jdata[:, -self.class_dim:]
 
-    def from_mesh(self, grid, points, normals, colors, device='cuda'):
+    def from_mesh(self, grid, points, normals, classes, device='cuda'):
         self.grid = grid
         v_stars = torch.tensor(points, dtype=torch.float32, device=device)
         normals = torch.tensor(normals, dtype=torch.float32, device=device)
@@ -87,18 +88,18 @@ class PoNQ_grid:
         # Qs = Qs/trace[..., None]
         self.Qs = Qs
         self.normals = normals
-        self.colors = torch.tensor(colors, dtype=torch.float32, device=device)
+        self.classes = torch.tensor(classes, dtype=torch.float32, device=device)
 
     def get_pool(self, k_s=2):
         '''Returns new PoNQ Grid'''
         feature, grid = self.grid.avg_pool(k_s, self.feature, k_s)
         new_grid_size = self.grid_size//k_s
-        new_grid = PoNQ_grid(new_grid_size)
+        new_grid = PoNQ_grid(new_grid_size, class_dim=self.class_dim)
         new_grid.from_feature(grid, feature)
         # Divide by trace to preserve mean
         trace = (new_grid.Qs[..., np.arange(3), np.arange(3)]).sum(-1, True)
         new_grid.normals /= trace
-        new_grid.colors /= trace
+        new_grid.classes /= trace
         new_grid.Qs /= trace[..., None]
         return new_grid
 

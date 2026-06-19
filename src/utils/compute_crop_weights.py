@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 def _decode_labels(crop) -> torch.Tensor:
-    """Decode normalised label channel back to integer class ids [1..8]."""
-    return (crop.jdata[:, 8] * 7 + 1).round()
+    """Decode class_probs channel back to integer class ids [1..8]."""
+    return crop.jdata[:, 5:13].argmax(dim=1) + 1
 
 
 def compute_crop_weight(crop_path: str | Path, rare_classes: list[int]):

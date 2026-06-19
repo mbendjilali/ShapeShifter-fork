@@ -57,7 +57,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 
 import fvdb
 from diffusion_tensor import DiffusionTensor
-from PoNQ_grid import PoNQ_grid
 
 try:
     import laspy
@@ -186,18 +185,6 @@ def aggregate_voxels(
     sum_xyz  = torch.zeros(V, 3).scatter_add_(0, vids.unsqueeze(1).expand(-1, 3), xyt)
     mean_xyz = (sum_xyz / cnt).numpy()
 
-    # PCA normals per voxel (batched 3×3 eigh)
-    centered = xyt - sum_xyz[vids] / count[vids].unsqueeze(1)
-    cov = torch.zeros(V, 3, 3)
-    for a in range(3):
-        for b in range(3):
-            cov[:, a, b].scatter_add_(0, vids, centered[:, a] * centered[:, b])
-    cov /= cnt.unsqueeze(-1).clamp(min=1)
-    _, eigvec = torch.linalg.eigh(cov)
-    normals   = eigvec[:, :, 0]
-    flip      = torch.where(normals[:, 2] < 0, -1.0, 1.0).unsqueeze(1)
-    normals   = (normals * flip).numpy().astype(np.float32)
-
     def scatter_mean_1d(arr: np.ndarray) -> np.ndarray:
         t = torch.tensor(arr, dtype=torch.float32)
         s = torch.zeros(V).scatter_add_(0, vids, t)
@@ -206,35 +193,15 @@ def aggregate_voxels(
     mean_intensity = scatter_mean_1d(intensity)
     mean_height    = scatter_mean_1d(height)
 
-    # majority vote for semantic class
-    encoding_factors = torch.tensor([1.0, 0.3, 1.0, 1.0, 1.0, 0.8, 1.0, 1.0])
-    sem_t  = torch.tensor(sem.astype(np.int64) - 1, dtype=torch.long)
-    # create a vector of one-hot encodings for each point and multiply by the corresponding encoding factor
-    oh     = torch.zeros(N, cfg["n_classes"])
-    oh.scatter_(1, sem_t.unsqueeze(1), 1.0)
-    oh     = oh * encoding_factors
-    # sum the weighted one-hot vectors for each voxel
-    cc     = torch.zeros(V, cfg["n_classes"]).scatter_add_(
-        0, vids.unsqueeze(1).expand(-1, cfg["n_classes"]), oh)
-    # majority vote
-    class_norm = (cc.argmax(1).float() / max(cfg["n_classes"] - 1, 1)).numpy().astype(np.float32)
+    sem_t = torch.nn.functional.one_hot(
+        torch.tensor(sem.astype(np.int64) - 1, dtype=torch.long),
+        num_classes=cfg["n_classes"],
+    ).float()
 
-    return grid, mean_xyz, normals, mean_intensity, mean_height, class_norm
+    cc = torch.zeros(V, cfg["n_classes"]).scatter_add_(
+        0, vids.unsqueeze(1).expand(-1, cfg["n_classes"]), sem_t)
 
-# ---------------------------------------------------------------------------
-# PoNQ → DiffusionTensor
-# ---------------------------------------------------------------------------
-
-def _ponq_to_dt(pg: PoNQ_grid, device: str) -> DiffusionTensor:
-    def _t(x):
-        return x.to(device) if isinstance(x, torch.Tensor) \
-            else torch.tensor(x, dtype=torch.float32, device=device)
-    n = pg.normals.shape[0] if isinstance(pg.normals, torch.Tensor) else len(pg.normals)
-    return DiffusionTensor.get_tensor_from_data(
-        pg.grid.to(device), _t(pg.normals), _t(pg.local_offset),
-        _t(pg.colors), torch.ones(n, 1, device=device),
-    )
-
+    return grid, mean_xyz, mean_intensity, mean_height, cc
 
 # ---------------------------------------------------------------------------
 # Core encoding from already-detrended, XY-origin-shifted points
@@ -250,28 +217,51 @@ def _encode_points(
 ) -> None:
     """Voxelise, pool, and save a pyramid for one set of points."""
     save_dir.mkdir(parents=True, exist_ok=True)
+    device = cfg["device"]
+    voxel_size = cfg["voxel_size_initial"]
     height = np.clip(xyz[:, 2], 0.0, cfg["max_height_m"]) / cfg["max_height_m"]
-    grid, mean_xyz, normals, mean_int, mean_h, cls_n = aggregate_voxels(
-        cfg, xyz, sem, intensity, height
-    )
-    colors_np = np.stack([mean_int, mean_h, cls_n], axis=-1).astype(np.float32)
 
-    pg = PoNQ_grid(cfg["initial_size"])
-    pg.from_mesh(grid.to(cfg["device"]), mean_xyz, normals, colors_np, device=cfg["device"])
+    grid, mean_xyz, mean_int, mean_h, cc = aggregate_voxels(cfg, xyz, sem, intensity, height)
 
-    # Save the finest level (needed by the highest-level upsampler)
-    pg.compute_local_offset()
-    torch.save(_ponq_to_dt(pg, cfg["device"]), save_dir / f"{cfg['initial_size']}.pt")
+    mean_xyz_t = torch.tensor(mean_xyz, dtype=torch.float32, device=device)
+    voxel_centers = grid.grid_to_world(grid.ijk.float()).jdata
+    local_offset = (mean_xyz_t - voxel_centers) / voxel_size
 
+    int_t = torch.tensor(mean_int, dtype=torch.float32, device=device).unsqueeze(1)
+    h_t   = torch.tensor(mean_h,   dtype=torch.float32, device=device).unsqueeze(1)
+    cc_t  = cc.to(device)
+
+    # Pool [local_offset(3), intensity(1), height(1), cc(n_classes)] together.
+    # avg_pool on cc preserves the argmax → correct majority class at every level.
+    feat = torch.cat([local_offset, int_t, h_t, cc_t], dim=1)
+    feat_jt = fvdb.JaggedTensor([feat])
+
+    def _to_dt(g, f):
+        lo      = f[:, :3]
+        intens  = f[:, 3:4]
+        ht      = f[:, 4:5]
+        cc_f    = f[:, 5:]
+        total   = cc_f.sum(1, keepdim=True).clamp(min=1e-6)
+        class_probs = cc_f / total
+        features  = torch.cat([intens, ht, class_probs], dim=1)   # (V, 10)
+        mask    = torch.ones(len(f), 1, device=device)
+        return DiffusionTensor.get_tensor_from_data(g, lo, features, mask)
+
+    torch.save(_to_dt(grid, feat), save_dir / f"{cfg['initial_size']}.pt")
+
+    current_grid = grid
+    current_feat = feat_jt
     size = cfg["initial_size"]
     for t_size in cfg["targets"]:
-        pg = pg.get_pool(size // t_size)
-        pg.compute_local_offset()
-        torch.save(_ponq_to_dt(pg, cfg["device"]), save_dir / f"{t_size}.pt")
+        k_s = size // t_size
+        pooled, new_grid = current_grid.avg_pool(k_s, current_feat, k_s)
+        torch.save(_to_dt(new_grid, pooled.jdata), save_dir / f"{t_size}.pt")
+        current_grid = new_grid
+        current_feat = pooled
         size = t_size
 
     if verbose:
-        print(f"    → {save_dir.name}  ({int(grid.total_voxels):,} voxels at {cfg['voxel_size_initial']}m)")
+        print(f"    → {save_dir.name}  ({int(grid.total_voxels):,} voxels at {voxel_size}m)")
 
 
 # ---------------------------------------------------------------------------
@@ -459,11 +449,12 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
         raise RuntimeError("pymeshlab required for PLY export")
 
     g = dt.get_global().remove_mask()
-    normals, positions, colors, _ = DiffusionTensor.get_feature_data(g.jdata)
-    positions = positions.cpu().detach().numpy()
-    normals_n = normals.cpu().detach().numpy()
-    cls_col   = colors[:, 2:3].cpu().detach().numpy()
-    rgb       = np.repeat(cls_col, 3, axis=1).clip(0, 1)
+    positions, features, _ = DiffusionTensor.get_feature_data(g.jdata)
+    positions   = positions.cpu().detach().numpy()
+    class_probs = features[:, 2:].cpu().detach().numpy()
+    class_idx   = class_probs.argmax(axis=-1).clip(0, 7)
+    rgb         = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / 7.0
+    normals_n   = np.zeros_like(positions)
 
     ms = ml.MeshSet()
     v_col = np.column_stack([rgb, np.ones_like(rgb[:, :1])])
@@ -479,7 +470,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Encode DALES LAZ tiles as 50×50m crops")
-    parser.add_argument("--config", help="Encoding configuration file path")
+    parser.add_argument("--config", default="/home/moussabendjilali/libs/ShapeShifter/configs/encoding/dales.json", help="Encoding configuration file path")
     parser.add_argument("--tile",  default=None, type=str, help="Tile ID (e.g. 5080_54435)")
     parser.add_argument("--all",   action="store_true",    help="Encode all tiles in --split")
     parser.add_argument("--split", default="train", choices=["train", "test"])
@@ -487,7 +478,7 @@ if __name__ == "__main__":
     parser.add_argument("--export_ply",    action="store_true", help="Export first crop's 256.pt as PLY")
     parser.add_argument("--skip_complete", action="store_true",
                         help="Skip crops that already have all pyramid levels on disk")
-    parser.add_argument("--out", type=str)
+    parser.add_argument("--out", default="/home/moussabendjilali/libs/ShapeShifter/data", type=str)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--crop_size", type=float)
     parser.add_argument("--crop_stride", type=float)

@@ -40,31 +40,31 @@ def blur_tensor(X, iterations=1, blur_kernel=9):
 
 
 class DiffusionTensor(fvdb.nn.VDBTensor):
-    """features: normals, offset (local or global), mask"""
+    """
+    Feature layout: [offset(3), intensity(1), height(1), class_probs(8), mask(1)] = 14 channels
+
+    offset      — local sub-voxel offset, normalised by voxel size
+    intensity   — mean LiDAR intensity in [0, 1]
+    height      — height above ground in [0, 1]
+    class_probs — soft semantic class distribution (sums to ~1 per voxel)
+    mask        — occupancy: 1 for real voxels, -1 for empty slots in dense grids
+    """
+
     @staticmethod
     def from_vdb(vdb_tensor: fvdb.nn.VDBTensor):
         return DiffusionTensor(vdb_tensor.grid, vdb_tensor.data)
 
     @staticmethod
     def get_feature_data(jdata):
-        """
-        Returns
-        --------
-        normals = jdata[:, :3]
-
-        offset = jdata[:, 3:6]
-
-        mask = jdata[:, -1:]
-        """
-        normals = jdata[:, :3]
-        offset = jdata[:, 3:6]
-        colors = jdata[:, 6:9]
-        mask = jdata[:, -1:]
-        return normals, offset, colors, mask
+        """Returns (offset, features, mask) where features = [intensity, height, class_probs(8)]."""
+        offset = jdata[:, :3]
+        features = jdata[:, 3:-1]
+        mask   = jdata[:, -1:]
+        return offset, features, mask
 
     @staticmethod
-    def get_tensor_from_data(grid, normals, local_offset, colors, mask):
-        return DiffusionTensor(grid, grid.jagged_like(torch.cat((normals, local_offset, colors, mask), -1)))
+    def get_tensor_from_data(grid, offset, features, mask):
+        return DiffusionTensor(grid, grid.jagged_like(torch.cat((offset, features, mask), -1)))
 
     @staticmethod
     def fill_upsampled_with_gt(trilinear_upsampled_tensor, gt_fine_tensor):
@@ -76,63 +76,50 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         return DiffusionTensor.from_vdb(target_tensor)
 
     def clip(self):
-        self.data.jdata[:, 3:6] = torch.clip(
-            self.data.jdata[:, 3:6], -.5, .5)
+        self.data.jdata[:, :3] = torch.clip(self.data.jdata[:, :3], -.5, .5)
 
-    def trilinear_upsample(self, subdiv_factor=2, normalize_normals=False):
+    def trilinear_upsample(self, subdiv_factor=2):
         """Input
         -------
-        self: "clean" DiffusionTensor (1 mask)
+        self: "clean" DiffusionTensor (mask = 1)
 
         Returns
         -------
-        Trilinealy interpolated DiffusionTensor
+        Trilinearly interpolated DiffusionTensor
         """
-
         assert len(self.jdata[..., -1].unique()) == 1
         diff_tens = self.get_global()
 
         up_grid = self.grid.subdivided_grid(subdiv_factor=subdiv_factor)
         new_centers = up_grid.grid_to_world(up_grid.ijk.float())
         up_feat = self.grid.sample_trilinear(new_centers, diff_tens.data)
-        normalized_normals, global_offset, colors, mask = self.get_feature_data(
-            up_feat.jdata)
-        if normalize_normals:
-            normalized_normals /= (normalized_normals **
-                                   2).sum(-1, keepdims=True).sqrt()
-        else:
-            normalized_normals /= mask
+        global_offset, features, mask = self.get_feature_data(up_feat.jdata)
 
-        colors /= mask
+        features        /= mask
         global_offset /= mask
-        # mask = 2*mask-1 # normalize to -1, 1
-        diff_tens = DiffusionTensor.get_tensor_from_data(
-            up_grid, normalized_normals, global_offset, colors, mask)
+
+        diff_tens = DiffusionTensor.get_tensor_from_data(up_grid, global_offset, features, mask)
         diff_tens = diff_tens.get_local()
-        # mask based on offset
-        new_mask = 1.-2.*diff_tens.jdata[..., 3:6].abs().max(-1).values
+
+        new_mask = 1. - 2. * diff_tens.jdata[..., :3].abs().max(-1).values
         diff_tens.jdata[..., -1] = torch.clamp(new_mask, -1., 1.)
         return diff_tens
 
     def get_global(self):
-        normals, local_offset, colors, mask = self.get_feature_data(
-            self.jdata)
+        offset, features, mask = self.get_feature_data(self.jdata)
         voxel_centers = self.grid.grid_to_world(self.grid.ijk.float())
-        global_offset = local_offset*self.grid.voxel_sizes.max()+voxel_centers.jdata
-        return DiffusionTensor.get_tensor_from_data(self.grid, normals, global_offset, colors, mask)
+        global_offset = offset * self.grid.voxel_sizes.max() + voxel_centers.jdata
+        return DiffusionTensor.get_tensor_from_data(self.grid, global_offset, features, mask)
 
     def get_local(self):
-        normals, global_offset, colors, mask = self.get_feature_data(
-            self.jdata)
+        global_offset, features, mask = self.get_feature_data(self.jdata)
         voxel_centers = self.grid.grid_to_world(self.grid.ijk.float())
-        local_offset = (global_offset-voxel_centers.jdata) / \
-            self.grid.voxel_sizes.max()
-        return DiffusionTensor.get_tensor_from_data(self.grid, normals, local_offset, colors, mask)
+        local_offset = (global_offset - voxel_centers.jdata) / self.grid.voxel_sizes.max()
+        return DiffusionTensor.get_tensor_from_data(self.grid, local_offset, features, mask)
 
     def to_custom_dense(self, blur_kernel=9):
         '''Last coordinate (mask) set to -1'''
         dense_x = self.to_dense()
-        # set last coordinate to -1
         mask = (dense_x[..., -1]) == 0
         dense_x_flat = dense_x.view(-1, dense_x.shape[-1])
         dense_x_flat[mask.flatten(), -1] = -1
@@ -141,10 +128,8 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         vdb_tensor = fvdb.nn.vdbtensor_from_dense(
             dense_x, ijk_min=ijk_min, origins=self.grid.origins, voxel_sizes=self.grid.voxel_sizes)
 
-        # add blur
         to_change = vdb_tensor.jdata[..., -1] < 0
         blur_x = blur_tensor(vdb_tensor, blur_kernel=blur_kernel)
-        # blur_x.data.jdata[..., :-1] /= blur_x.jdata.abs().max(0).values[None, :-1]
         blur_x.data.jdata[..., -1] = -1
         vdb_tensor.data.jdata[to_change] = blur_x.data.jdata[to_change]
         return DiffusionTensor.from_vdb(vdb_tensor)
@@ -167,18 +152,12 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         feat.jdata[..., -1] = 1
         return DiffusionTensor(new_grid, feat)
 
-    def colored_PC(self, point_size=None, return_plot=True, use_normals=False):
-        normals, global_offset, colors, mask = self.get_feature_data(
-            self.jdata)
-        if use_normals:
-            normals = normals.cpu().detach().numpy()
-            normals /= np.sqrt((normals ** 2).sum(-1, keepdims=True))
-            c = normals
-        else:
-            c = colors.cpu().detach().numpy()/2
-
-        c = (1+c)/2.
-        vstars = global_offset.cpu().detach().numpy()
+    def colored_PC(self, point_size=None, return_plot=True):
+        offset, features, _ = self.get_feature_data(self.jdata)
+        class_probs = features[:, 2:].cpu().detach().numpy()   # (V, 8)
+        class_idx   = class_probs.argmax(axis=-1)            # (V,)
+        c = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / 7.0
+        vstars = offset.cpu().detach().numpy()
         if return_plot:
             return plot(vstars, c=c, shading={"point_size": point_size})
-        return vstars, normals, c
+        return vstars, c

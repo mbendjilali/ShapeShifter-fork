@@ -93,7 +93,7 @@ def compute_all_generations_dales(
     extent_m=100.0,
     max_level=4,
     eval_batch_size=5,
-    features=10,
+    features=14,
     ddim_steps=None,
     verbose=False,
     nz=8,
@@ -190,34 +190,6 @@ def generate_level(generated_X, i, example_mesh_name, src, ddim_steps=None, verb
     return DiffusionTensor.from_vdb(generated_X).remove_mask()
 
 
-def compute_all_generations(example_mesh_name, src, base_res, max_level=3, eval_batch_size=10, features=10, ddim_steps=None, X0G=None, verbose=False, src_path="./data/GT_sparse_tensors"):
-    generated_Xs = []
-    # blurs = []
-    diffusion = load_diffusion(example_mesh_name, 0, src)
-    diffusion.eval()
-    if X0G is None:
-        X0G = compute_base_grid(example_mesh_name, eval_batch_size, base_res, src_path)
-    t0 = time.time()
-    if ddim_steps is None:
-        print('using ddpm')
-        generated_X = diffusion.ddpm_sample(
-            grid_to_VDB(X0G, torch.randn, [features]))
-    else:
-        print('using ddim')
-        generated_X = diffusion.ddim_sample(grid_to_VDB(
-            X0G, torch.randn, [features]), steps=diffusion.max_T//ddim_steps)
-    generated_X = DiffusionTensor.from_vdb(generated_X).remove_mask()
-    generated_Xs.append(generated_X)
-    if verbose:
-        print('LEVEL {}: {}'.format(0, time.time()-t0))
-    for i in range(1, max_level+1):
-        generated_X = generate_level(
-            generated_X, i, example_mesh_name, src, ddim_steps, verbose)
-        generated_Xs.append(generated_X)
-        # blurs.append(X_BLUR)
-    return generated_Xs
-
-
 def export_pc(vstars, normals, colors, save_pc_path=None, save_mesh_path=None, **kwargs):
     ms = ml.MeshSet()
     v_colors = np.column_stack((colors, np.ones_like(colors[:, :1])))
@@ -225,45 +197,9 @@ def export_pc(vstars, normals, colors, save_pc_path=None, save_mesh_path=None, *
                     v_normals_matrix=normals, v_color_matrix=v_colors)
     ms.add_mesh(nmesh)
     if not save_pc_path is None:
-        ms.save_current_mesh(save_pc_path, save_vertex_normal=True)
-        if save_mesh_path is None:
-            return
-    print('computing poisson')
-    ms.apply_filter('generate_surface_reconstruction_screened_poisson',
-                    samplespernode=1., pointweight=10, depth=9)
-    ms.apply_filter(
-        'transfer_attributes_per_vertex', sourcemesh=0, targetmesh=1)  # Transfer PC colors to mesh
-    if not save_mesh_path is None:
-        ms.save_current_mesh(save_mesh_path)
-        return
-    return ms
+        ms.save_current_mesh(save_pc_path, save_vertex_normal=False)
 
 
-def save_generation_pc(generated_X, src_path, level=0, inds=None, min_ind=0):
-    if inds is None:
-        inds = range(generated_X.grid_count)
-    for ind in inds:
-        global_X = DiffusionTensor(
-            generated_X.grid[ind], generated_X.data[ind]).get_global().remove_mask()
-        normalized_normals, global_offset, colors, mask = global_X.get_feature_data(
-            global_X.jdata)
-        if len(normalized_normals > 0):
-            normalized_normals = normalized_normals.cpu().detach().numpy()
-            normalized_normals /= np.maximum(
-                np.sqrt((normalized_normals**2).sum(-1, keepdims=True)), 1e-10)
-            vstars = global_offset.cpu().detach().numpy()
-            colors = colors.cpu().detach().numpy()/2.
-            colors = np.clip((colors+1)/2., 0, 1)
-            save_pc_path = '{}/gen_{}_{}.ply'.format(
-                src_path, min_ind+ind, level)
-            export_pc(vstars, normalized_normals, colors,
-                      save_pc_path)
-        else:
-            print('void shape!')
-
-
-# DALES semantic class palette (class index 0-based → RGB float32 in [0,1])
-# Index = sem_class - 1: 0=Ground 1=Veg 2=Cars 3=Trucks 4=PowerLines 5=Fences 6=Poles 7=Buildings
 _DALES_PALETTE = np.array([
     [0.50, 0.50, 0.50],  # Ground       — grey
     [0.13, 0.50, 0.13],  # Vegetation   — green
@@ -288,21 +224,18 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
             generated_X.grid[ind], generated_X.data[ind]
         ).get_global().remove_mask()
 
-        normals, positions, colors, _ = DiffusionTensor.get_feature_data(g.jdata)
+        positions, colors, _ = DiffusionTensor.get_feature_data(g.jdata)
 
         if len(positions) == 0:
             print(f'  sample {min_ind + ind} level {level}: void — skipped')
             continue
 
         positions_np = positions.cpu().numpy()
-        normals_np   = normals.cpu().numpy()
-        normals_np  /= np.maximum(np.linalg.norm(normals_np, axis=-1, keepdims=True), 1e-10)
+        colors_np    = colors.cpu().numpy()     # (V, 10): [intensity, height, class_probs(8)]
+        class_idx    = colors_np[:, 2:].argmax(axis=-1).clip(0, 7)
+        rgb          = _DALES_PALETTE[class_idx]
 
-        colors_np = colors.cpu().numpy()   # (V, 3): [intensity, height, sem_class_norm]
-        sem_norm  = np.clip(colors_np[:, 2], 0.0, 1.0)
-        class_idx = np.round(sem_norm * 7).astype(int).clip(0, 7)
-        rgb       = _DALES_PALETTE[class_idx]          # (V, 3) in [0, 1]
-
+        normals_np   = np.zeros_like(positions_np)
         ply_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.ply')
         export_pc(positions_np, normals_np, rgb, save_pc_path=ply_path)
 
@@ -358,28 +291,3 @@ if __name__ == '__main__':
             for level_i, g in enumerate(GX):
                 torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
                 save_dales_pc(g, OUT, level=level_i, min_ind=min_ind)
-
-    # ------------------------------------------------------------------
-    # Legacy single-shape mode (original ShapeShifter behaviour)
-    # ------------------------------------------------------------------
-    else:
-        OUT = args.out or SRC.replace('checkpoints/diffusion_models', 'output')
-        os.makedirs(OUT, exist_ok=True)
-        names = np.unique([e.split('_')[0] for e in os.listdir(SRC)])
-        print('NAMES: ', ' '.join(names))
-        for name in names:
-            save_path = os.path.join(OUT, name)
-            for batch_i in range(args.total_num // args.batch_size):
-                os.makedirs(save_path, exist_ok=True)
-                existing = glob.glob(os.path.join(save_path, 'gen_*.ply'))
-                min_ind = (max(int(e[-7]) for e in existing) + 1) if existing else 0
-                with torch.no_grad():
-                    GX = compute_all_generations(
-                        name, SRC, args.base_res,
-                        max_level=args.levels,
-                        eval_batch_size=args.batch_size,
-                        ddim_steps=args.ddim_steps,
-                    )
-                for i, g in enumerate(GX):
-                    torch.save(g, os.path.join(save_path, f'gen_{min_ind}_{i}.pt'))
-                    save_generation_pc(g, save_path, i, min_ind=min_ind)
