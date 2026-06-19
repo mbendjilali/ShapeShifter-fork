@@ -56,6 +56,9 @@ class DiffusionCNN(nn.Module):
             torch.cat((x.data.jdata, t), -1)))
         return self.net(new_x)
 
+# GVAE latents : dense tensors
+# Shapeshifter diffusion grids: sparse 
+
 
 class UpSampler(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int, encoder_layers: int = 3, mult=2, dropout=.05):

@@ -175,6 +175,7 @@ def _train_dales(args, cfg, device='cuda'):
         timesteps=cfg["diffusion_timesteps"],
         max_T=cfg.get("max_T", None) if args.level > 0 else None,
         loss=nn.functional.mse_loss,
+        class_channels = cfg["class_channels"],
         model_upsampler=model_upsampler,
     ).cuda()
 

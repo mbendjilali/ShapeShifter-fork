@@ -50,17 +50,19 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         """
         Returns
         --------
-        normals = jdata[:, :3]
+        xyz = jdata[:, :3]
+        intensity = jdata[:, 4]
+        height = jdata[:, 5]
+        mask = jdata[:, 6]
+        sem_classes = jdata[:, 7: 7 + n_classes]
 
-        offset = jdata[:, 3:6]
-
-        mask = jdata[:, -1:]
         """
-        normals = jdata[:, :3]
-        offset = jdata[:, 3:6]
-        colors = jdata[:, 6:9]
-        mask = jdata[:, -1:]
-        return normals, offset, colors, mask
+        xyz = jdata[:, :3]
+        intensity = jdata[:, 4]
+        height = jdata[:, 5]
+        mask = jdata[:, 6]
+        sem_classes = jdata[:, 7: 7 + n_classes]
+        return xyz, intensity, height, mask, sem_classes
 
     @staticmethod
     def get_tensor_from_data(grid, normals, local_offset, colors, mask):

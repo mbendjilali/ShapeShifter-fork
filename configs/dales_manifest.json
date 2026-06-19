@@ -26,6 +26,7 @@
   "common_sampling_ratio": 0.1,
   "weights_path": "data/dales/crop_weights.json",
   "vegetation_weights_path": "data/dales_veg_weights.json",
+  "class_channels": (7, 14),
   "train": [
     {"id": "5080_54435", "split": "train"},
     {"id": "5085_54320", "split": "train"},

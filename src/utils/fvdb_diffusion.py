@@ -45,11 +45,14 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         time_difference=0.,
         loss=F.mse_loss,
         model_upsampler=None,
+        class_channels= (7, 14)
+
     ):
         super().__init__()
         self.model = model
         self.model_upsampler = model_upsampler
         self.channels = 1
+        self.class_channels = class_channels
 
         if noise_schedule == "linear":
             self.log_snr = beta_linear_log_snr
@@ -189,8 +192,19 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         times = times[X.data.jidx.long()]
 
         noisy_latents, target_X = self.q_sample(X, times, X_Blur)
-
         # prediction
         pred = self.model(noisy_latents, times)
-        # return self.loss(pred.jdata, target_X)
-        return self.loss(pred.jdata, X.jdata)
+
+        c0, c1 = self.class_channels
+
+        # MSE
+        pred   = torch.cat([pred.jdata[:, :c0], pred.jdata[:, c1:]], dim=1)
+        target = torch.cat([target_X[:, :c0],   target_X[:, c1:]], dim=1)  # model output for non semantic 
+        mse_loss = self.loss(pred, target) # self.loss is mse by default
+
+        # BCE for semantic
+        pred_class = pred.jdata[:, 7: 7 + self.n_classes] # model output for semantic classes
+        taget_class = target_X[:, 7: 7 + self.n_classes].clamp(0,1) # ground truth semantic classes 
+        class_loss = F.binary_cross_entropy_with_logits(pred_class, taget_class)
+
+        return mse_loss + class_loss
