@@ -56,6 +56,8 @@ class DALESDataset:
         base_resolution: int = 16,
         sampling_ratio: float = 1.0,
         common_sampling_ratio: Optional[float] = None,
+        preload: bool = True,
+        level: Optional[int] = None,
     ):
         self.upsample_fac = upsample_fac
         self.base_resolution = base_resolution
@@ -124,13 +126,61 @@ class DALESDataset:
                 "Run: python src/shape_encoding/pc_encoding.py --all --split train"
             )
 
+        self._cache: dict[str, "DiffusionTensor"] = {}
+        self._level_cache: dict[str, tuple] = {}  # crop_id -> (X_cpu, X_UP_cpu, Y_cpu)
+        self._dense_cache: dict[str, "DiffusionTensor"] = {}  # crop_id -> dense X0_cpu (level 0)
+        self._preloaded_level: Optional[int] = None
+        if preload:
+            self._preload(split, level)
+
 
     # ------------------------------------------------------------------
     # GT loading
     # ------------------------------------------------------------------
 
+    def _preload(self, split: str, level: Optional[int] = None) -> None:
+        """Load all crop .pt files into CPU RAM and optionally precompute (X, X_UP, Y)."""
+        from tqdm import tqdm
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        desc = f"Caching crops (+ level-{level} precompute)" if level is not None else "Caching crops"
+        for crop_id in tqdm(self.crops, desc=desc):
+            # Load raw .pt files into CPU cache first
+            crop_dir = self.gt_root / split / crop_id
+            for pt_file in crop_dir.glob("*.pt"):
+                key = str(pt_file)
+                if key not in self._cache:
+                    obj = torch.load(pt_file, weights_only=False)
+                    if not isinstance(obj, DiffusionTensor):
+                        obj = DiffusionTensor(obj.grid, obj.data)
+                    self._cache[key] = DiffusionTensor(obj.grid.to("cpu"), obj.data.to("cpu"))
+
+            # Precompute on GPU, store back on CPU
+            if level == 0:
+                X0 = self.load_crop_level0(split, crop_id, device)
+                self._dense_cache[crop_id] = DiffusionTensor(X0.grid.to("cpu"), X0.data.to("cpu"))
+            elif level is not None:
+                X, X_UP, Y = self.load_crop_levelN(split, crop_id, level, device)
+                self._level_cache[crop_id] = (
+                    DiffusionTensor(X.grid.to("cpu"),    X.data.to("cpu")),
+                    DiffusionTensor(X_UP.grid.to("cpu"), X_UP.data.to("cpu")),
+                    DiffusionTensor(Y.grid.to("cpu"),    Y.data.to("cpu")),
+                )
+
+        self._preloaded_level = level
+        if level == 0:
+            suffix = f", {len(self._dense_cache)} dense tensors precomputed (level 0)"
+        elif level is not None:
+            suffix = f", {len(self._level_cache)} (X,X_UP,Y) tuples for level {level}"
+        else:
+            suffix = ""
+        print(f"Cached {len(self._cache)} files{suffix}.")
+
     def _load_dt(self, path: Path, device: str) -> DiffusionTensor:
-        """Load a .pt file as DiffusionTensor on the target device."""
+        """Load a .pt file as DiffusionTensor on the target device, using RAM cache if available."""
+        key = str(path)
+        if key in self._cache:
+            cached = self._cache[key]
+            return DiffusionTensor(cached.grid.to(device), cached.data.to(device))
         obj = torch.load(path, weights_only=False)
         if not isinstance(obj, DiffusionTensor):
             obj = DiffusionTensor(obj.grid, obj.data)
@@ -181,9 +231,26 @@ class DALESDataset:
         crop_ids = self.sample_crop_ids(batch_size)
 
         if level == 0:
+            if self._dense_cache:
+                tensors = []
+                for c in crop_ids:
+                    cached = self._dense_cache[c]
+                    tensors.append(DiffusionTensor(cached.grid.to(device), cached.data.to(device)))
+                return _jcat_dt(tensors)
             tensors = [self.load_crop_level0(split, c, device) for c in crop_ids]
             return _jcat_dt(tensors)
 
+        # Fast path: precomputed tuples, only CPU→GPU transfer + jcat
+        if level == self._preloaded_level and self._level_cache:
+            X_list, XUP_list, X0_list = [], [], []
+            for c in crop_ids:
+                X_cpu, XUP_cpu, Y_cpu = self._level_cache[c]
+                X_list.append(DiffusionTensor(X_cpu.grid.to(device),   X_cpu.data.to(device)))
+                XUP_list.append(DiffusionTensor(XUP_cpu.grid.to(device), XUP_cpu.data.to(device)))
+                X0_list.append(DiffusionTensor(Y_cpu.grid.to(device),   Y_cpu.data.to(device)))
+            return _jcat_dt(X_list), _jcat_dt(XUP_list), _jcat_dt(X0_list)
+
+        # Slow path: compute trilinear upsample on the fly
         X_list, XUP_list, X0_list = [], [], []
         for c in crop_ids:
             X, X_UP, X0 = self.load_crop_levelN(split, c, level, device)
@@ -219,7 +286,11 @@ class DALESDataset:
         bce_losses = []
         for crop_id in sample_ids:
             if level == 0:
-                X0 = self.load_crop_level0(split, crop_id, device)
+                if crop_id in self._dense_cache:
+                    cached = self._dense_cache[crop_id]
+                    X0 = DiffusionTensor(cached.grid.to(device), cached.data.to(device))
+                else:
+                    X0 = self.load_crop_level0(split, crop_id, device)
                 with torch.no_grad():
                     mse_loss, bce_loss = diffusion(X0)
             else:

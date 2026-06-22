@@ -23,9 +23,9 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
     dataset = DALESDataset(manifest, split="train",
                            upsample_fac=cfg["upsample_fac"],
-                           base_resolution=cfg["base_resolution"])
+                           base_resolution=cfg["base_resolution"],
+                           level=args.level)
 
-    # Sample one batch to determine channel count
     X, X_UP, Y = dataset.sample_batch("train", args.level, 1, device)
 
     model_upsampler = UpSampler(
@@ -57,7 +57,6 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
         L.append(LOSS_EMA)
 
     plt.plot(L, label='dales_{}'.format(args.level))
-    plt.yscale('log')
     plt.legend()
     plt.savefig('checkpoints/upsamplers/dales_{}.png'.format(args.level))
     model_upsampler.eval()
@@ -115,7 +114,6 @@ if __name__ == '__main__':
             train_epoch()
 
         plt.plot(L, label=args.model_name)
-        plt.yscale('log')
         plt.legend()
         plt.savefig('checkpoints/upsamplers/{}_{}.png'.format(args.model_name, args.level))
         model_upsampler.eval()

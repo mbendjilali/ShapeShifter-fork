@@ -131,14 +131,16 @@ def _train_dales(args, cfg, device='cuda'):
 
     manifest = cfg.get("manifest_path", "data/dales_manifest.json")
 
-    dataset = DALESDataset(manifest, 
+    dataset = DALESDataset(manifest,
                            split="train",
                            upsample_fac=cfg["upsample_fac"],
-                           base_resolution=cfg["base_resolution"])
+                           base_resolution=cfg["base_resolution"],
+                           level=args.level)
 
     val_dataset = DALESDataset.test_set(manifest,
                                         upsample_fac=cfg["upsample_fac"],
-                                        base_resolution=cfg["base_resolution"])
+                                        base_resolution=cfg["base_resolution"],
+                                        level=args.level)
 
 
     # Determine channel count from first available crop
@@ -230,19 +232,21 @@ def _train_dales(args, cfg, device='cuda'):
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
 
+            val_suffix = ""
             if val_dataset is not None and epoch % val_every == 0:
                 val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
-                    diffusion, "test", args.level, n_crops=4,
+                    diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                     clip_size=cfg["clip_size"], device=device,
                 )
                 if val_mse_loss is not None:
                     VAL_MSE_L.append((epoch, val_mse_loss.item()))
+                    val_suffix += f", val_mse_loss={val_mse_loss:.4f}"
                 if val_bce_loss is not None:
                     VAL_BCE_L.append((epoch, val_bce_loss.item()))
+                    val_suffix += f" + val_bce_loss={val_bce_loss:.4f}"
 
             # Update tqdm with current losses
-            tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" +
-                       (f", val_mse_loss={val_mse_loss:.4f} + val_bce_loss={val_bce_loss:.4f}" if val_dataset is not None else ""))
+            tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" + val_suffix)
 
             if epoch % save_every == 0 or epoch == n_epochs - 1:
                 plt.clf()
@@ -256,7 +260,6 @@ def _train_dales(args, cfg, device='cuda'):
                     plt.plot([v[0] for v in VAL_BCE_L], [v[1] for v in VAL_BCE_L],
                              label='Val_BCE', linestyle='--')
                 plt.xlabel('epoch')
-                plt.yscale('log')
                 plt.legend()
                 plt.savefig('checkpoints/diffusion_models/dales_loss_{}_{}.png'.format(
                     args.level, current_time))

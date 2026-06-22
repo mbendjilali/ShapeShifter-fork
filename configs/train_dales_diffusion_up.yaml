@@ -16,7 +16,7 @@ epochs: 300
 n_classes: 8
 
 lr: 0.0001
-batch_size: 1
+batch_size: 8
 clip_size: 20
 
 dropout: 0.05
@@ -25,3 +25,4 @@ diffusion_timesteps: 1000
 max_T: 500
 save_every: 30
 val_every: 60
+val_crops: 32

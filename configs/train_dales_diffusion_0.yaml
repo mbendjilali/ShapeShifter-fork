@@ -15,7 +15,7 @@ epochs: 300
 n_classes: 8
 
 lr: 0.0001
-batch_size: 4
+batch_size: 16
 clip_size: 20   # unused at level 0 but kept for consistency
 
 dropout: 0.05
@@ -23,3 +23,4 @@ time_emb: 6
 diffusion_timesteps: 1000
 save_every: 10
 val_every: 2
+val_crops: 32
