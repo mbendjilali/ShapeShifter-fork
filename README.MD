@@ -114,11 +114,13 @@ pip install setuptools==80.9.0
 ### 2. Train the model
 Run the training script as usual. During training, TensorBoard log files will be created in the ```runs/``` directory:
 
+```shell
 runs/
 ├── level_0/
 ├── level_1/
 ├── level_2/
 └── level_3/
+```
 
 Each directory corresponds to one diffusion level.
 
