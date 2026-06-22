@@ -231,13 +231,14 @@ def _train_dales(args, cfg, device='cuda'):
 
             epoch_mse_loss = epoch_mse_loss_sum / steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / steps_per_epoch
-            writer.add_scalar('Loss/train_MSE', epoch_mse_loss, epoch)
-            writer.add_scalar('Loss/train_BCE', epoch_bce_loss, epoch)
-            writer.add_scalar('Loss/train_total', epoch_mse_loss + epoch_bce_loss, epoch)
+
             MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
+            writer.add_scalar('Loss/train_MSE', MSE_LOSS_EMA, epoch)
+            writer.add_scalar('Loss/train_BCE', BCE_LOSS_EMA, epoch)
+            writer.add_scalar('Loss/train_total', MSE_LOSS_EMA + BCE_LOSS_EMA, epoch)
 
             val_suffix = ""
             if val_dataset is not None and epoch % val_every == 0:
