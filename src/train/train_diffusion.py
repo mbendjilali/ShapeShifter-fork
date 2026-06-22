@@ -192,6 +192,8 @@ def _train_dales(args, cfg, device='cuda'):
     MSE_L, BCE_L, VAL_MSE_L, VAL_BCE_L = [], [], [], []
     MSE_LOSS_EMA = None
     BCE_LOSS_EMA = None
+    best_val_loss = float('inf')
+    best_epoch = -1
     current_time = datetime.today().strftime('%d-%m-%H:%M')
 
     writer = SummaryWriter(log_dir=f"runs/diffusion_level_{args.level}_{current_time}")
@@ -236,9 +238,18 @@ def _train_dales(args, cfg, device='cuda'):
             BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
-            writer.add_scalar('Loss/train_MSE', MSE_LOSS_EMA, epoch)
-            writer.add_scalar('Loss/train_BCE', BCE_LOSS_EMA, epoch)
-            writer.add_scalar('Loss/train_total', MSE_LOSS_EMA + BCE_LOSS_EMA, epoch)
+            writer.add_scalars(
+                "Loss/train", 
+                {"MSE": epoch_mse_loss,
+                 "BCE": epoch_bce_loss,
+                 "Total": epoch_mse_loss + epoch_bce_loss,
+                }, epoch)
+            writer.add_scalars(
+                "Loss/train_EMA",
+                {"MSE": MSE_LOSS_EMA,
+                 "BCE": BCE_LOSS_EMA,
+                 "Total": MSE_LOSS_EMA + BCE_LOSS_EMA,
+                }, epoch)
 
             val_suffix = ""
             if val_dataset is not None and epoch % val_every == 0:
@@ -246,15 +257,38 @@ def _train_dales(args, cfg, device='cuda'):
                     diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                     clip_size=cfg["clip_size"], device=device,
                 )
-                if val_mse_loss is not None:
+                val_total_loss = val_mse_loss.item() + val_bce_loss.item()
+                if val_mse_loss is not None and val_bce_loss is not None:
                     VAL_MSE_L.append((epoch, val_mse_loss.item()))
                     val_suffix += f", val_mse_loss={val_mse_loss:.4f}"
-                    writer.add_scalar('Loss/val_MSE', val_mse_loss.item(), epoch)
-                if val_bce_loss is not None:
                     VAL_BCE_L.append((epoch, val_bce_loss.item()))
                     val_suffix += f" + val_bce_loss={val_bce_loss:.4f}"
-                    writer.add_scalar('Loss/val_BCE', val_bce_loss.item(), epoch)
-                    writer.add_scalar('Loss/val_total', val_mse_loss.item() + val_bce_loss.item(), epoch)
+                    writer.add_scalars(
+                        'Loss/Val', 
+                        {"Val_MSE": val_mse_loss.item(),
+                         "Val_BCE": val_bce_loss.item(),
+                         "Val_Total": val_total_loss,
+                        }, epoch
+                    )
+
+                    if val_total_loss < best_val_loss:
+                        best_val_loss = val_total_loss
+                        best_epoch = epoch
+                        best_ckpt = f"checkpoints/diffusion_models/dales_{args.level}_{current_time}_best.pt"
+                        torch.save(
+                            {"epoch": epoch, 
+                            "model_state_dict": diffusion.model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "best_val_loss": best_val_loss,
+                            "config": cfg,},
+                        best_ckpt)
+                        print(
+                            f"New best model saved at epoch {epoch}: {best_ckpt}"
+                            f"Validation loss: {best_val_loss:.4f} (MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")
+                        
+                        writer.add_scalar("Best Val Loss", best_val_loss, epoch)
+
+
 
             # Update tqdm with current losses
             tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" + val_suffix)
@@ -283,6 +317,8 @@ def _train_dales(args, cfg, device='cuda'):
         writer.close()
 
         print(ckpt)
+        print(f"Best epoch: {best_epoch}")
+        print(f"Best validation loss: {best_val_loss:.4f}")
 
 
 # ---------------------------------------------------------------------------
