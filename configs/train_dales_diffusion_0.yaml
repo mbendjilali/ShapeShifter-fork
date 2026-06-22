@@ -10,7 +10,7 @@ layers: 3
 first_ks: 3
 one_layers: 6
 features: 256
-epochs: 10
+epochs: 200
 
 n_classes: 8
 class_weight: [0.1, 0.05, 2.0, 2.0, 1.0, 2.0, 2.0, 0.2]
