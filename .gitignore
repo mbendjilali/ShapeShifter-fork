@@ -173,5 +173,3 @@ meshed_output
 *.zip
 *.ckpt
 *.mtl
-
-runs/
