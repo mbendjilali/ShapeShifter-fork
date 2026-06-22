@@ -391,7 +391,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Encode DALES LAZ tiles as 50×50m crops")
-    parser.add_argument("--config", default="/home/moussabendjilali/libs/ShapeShifter/configs/encoding/dales.json", help="Encoding configuration file path")
+    parser.add_argument("--config", default="/home/moussabendjilali/libs/ShapeShifter/configs/encoding/dales.yaml", help="Encoding configuration file path")
     parser.add_argument("--tile",  default=None, type=str, help="Tile ID (e.g. 5080_54435)")
     parser.add_argument("--all",   action="store_true",    help="Encode all tiles in --split")
     parser.add_argument("--split", default="train", choices=["train", "test"])

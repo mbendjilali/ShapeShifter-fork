@@ -94,7 +94,7 @@ def compute_all_generations_dales(
     extent_m=100.0,
     max_level=4,
     eval_batch_size=5,
-    features=None,
+    features=13,
     ddim_steps=None,
     verbose=False,
     nz=8,

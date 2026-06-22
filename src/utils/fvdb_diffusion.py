@@ -45,6 +45,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         time_difference=0.,
         n_classes=None,
         model_upsampler=None,
+        weight=None,
     ):
         super().__init__()
         self.model = model
@@ -68,6 +69,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         self.n_classes = n_classes
         self.MSEloss = nn.functional.mse_loss
         self.BCEloss = nn.functional.binary_cross_entropy_with_logits
+        self.weight = weight
 
     @property
     def device(self):
@@ -87,7 +89,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         """Convert BCE-trained semantic logits to probabilities in-place."""
         n_cls = getattr(self, 'n_classes', None)
         if n_cls:
-            x.data.jdata[:, 5:5 + n_cls] = torch.sigmoid(x.data.jdata[:, 5:5 + n_cls])
+            x.data.jdata[:, 4:4 + n_cls] = torch.sigmoid(x.data.jdata[:, 4:4 + n_cls])
 
     @torch.no_grad()
     def ddpm_sample(self, noisy_grid: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None, clip=None):
@@ -194,7 +196,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         noised_img = alpha[:, None] * target_X + sigma[:, None] * noise
         return fvnn.VDBTensor(grid=X.grid, data=X.grid.jagged_like(noised_img)), target_X
 
-    def forward(self, X: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None):
+    def forward(self, X: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None, weight: torch.tensor = None):
 
         # random times
         times = torch.zeros((X.grid_count,), device=self.device).float().uniform_(
@@ -206,12 +208,12 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # prediction
         pred: fvnn.VDBTensor = self.model(noisy_latents, times)
         
-        mse_pred = torch.cat([pred.jdata[:, :5], pred.jdata[:, -1:]], dim=1)
-        mse_target = torch.cat([X.jdata[:, :5], X.jdata[:, -1:]], dim=1)
+        mse_pred = torch.cat([pred.jdata[:, :4], pred.jdata[:, -1:]], dim=1)
+        mse_target = torch.cat([X.jdata[:, :4], X.jdata[:, -1:]], dim=1)
         mse_loss = self.MSEloss(mse_pred, mse_target)
 
-        class_pred = pred.jdata[:, 5:-1]
-        class_target = X.jdata[:, 5:-1]
-        class_loss = self.BCEloss(class_pred, class_target)
+        class_pred = pred.jdata[:, 4:-1]
+        class_target = X.jdata[:, 4:-1]
+        class_loss = self.BCEloss(class_pred, class_target, weight=self.weight)
         # return self.loss(pred.jdata, target_X)
         return mse_loss, class_loss

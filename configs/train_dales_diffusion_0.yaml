@@ -1,6 +1,6 @@
 # DALES — niveau 0 (base 16^3 dense)
 dataset: dales
-manifest_path: configs/dales_manifest.json
+manifest_path: configs/dales_manifest.yaml
 src_path: data/dales
 
 upsample_fac: 2
@@ -13,6 +13,8 @@ features: 256
 epochs: 10
 
 n_classes: 8
+class_weight: [0.1, 0.05, 2.0, 2.0, 1.0, 2.0, 2.0, 0.2]
+
 
 lr: 0.0001
 batch_size: 16

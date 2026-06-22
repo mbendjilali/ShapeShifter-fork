@@ -1,6 +1,6 @@
 # DALES — upsampler pre-training
 dataset: dales
-manifest_path: configs/dales_manifest.json
+manifest_path: configs/dales_manifest.yaml
 src_path: data/dales
 
 upsample_fac: 2

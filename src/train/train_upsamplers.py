@@ -20,7 +20,7 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     from dataset.dales_dataset import DALESDataset
     import math
 
-    manifest = cfg.get("manifest_path", "data/dales_manifest.json")
+    manifest = cfg.get("manifest_path", "data/dales_manifest.yaml")
     dataset = DALESDataset(manifest, split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"],
@@ -100,7 +100,8 @@ if __name__ == '__main__':
         ).to(device)
         optimizer = torch.optim.AdamW(model_upsampler.parameters(), lr=cfg["lr"])
         L = []
-        mt.count_parameters(model_upsampler)
+        
+        count_parameters(model_upsampler)
 
         def train_epoch():
             optimizer.zero_grad()

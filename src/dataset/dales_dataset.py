@@ -12,7 +12,7 @@ Batching: fvdb.jcat of heterogeneous sparse grids.
 
 from __future__ import annotations
 
-import json
+import yaml
 import random
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -39,7 +39,7 @@ class DALESDataset:
     Parameters
     ----------
     manifest_path : str | Path
-        Path to data/dales_manifest.json.
+        Path to data/dales_manifest.yaml.
     split : 'train' | 'test'
         Which split to expose (test tiles are never used during training).
     upsample_fac : int
@@ -63,41 +63,23 @@ class DALESDataset:
         self.base_resolution = base_resolution
 
         with open(manifest_path) as f:
-            manifest = json.load(f)
+            manifest = yaml.safe_load(f)
 
         records = manifest[split]
         self.gt_root = Path(manifest.get("gt_root", "data/dales"))
         self.sampling_ratio = manifest.get("sampling_ratio", sampling_ratio) 
         self.common_sampling_ratio = manifest.get("common_sampling_ratio", common_sampling_ratio)
-        self.weights_path = manifest.get("weights_path")
 
         self.crops: List[str] = []
-        self.crop_sampling_weights: List[float] = []
 
-        with open(self.weights_path) as f:
-            weights_by_tile = json.load(f)
-
-        vegetation_weights_path = manifest.get("vegetation_weights_path")
-        veg_weights_by_tile = None
-        if vegetation_weights_path and Path(vegetation_weights_path).exists():
-            with open(vegetation_weights_path) as f:
-                veg_weights_by_tile = json.load(f)
 
         total_of_crops = 0
         for rec in records:
             tile_id = rec["id"]
             crop_dirs = sorted(self.gt_root.glob(f"{split}/{tile_id}_x*_y*/"))
 
-            # build name → vegetation weight lookup before any reordering
-            if veg_weights_by_tile is not None:
-                raw_veg = veg_weights_by_tile.get(split, {}).get(tile_id, [])
-                veg_weight_for = {d.name: raw_veg[i] for i, d in enumerate(crop_dirs) if i < len(raw_veg)}
-            else:
-                veg_weight_for = {}
 
-            crop_weights = weights_by_tile.get(split, {}).get(tile_id)
-            if crop_weights is None or len(crop_weights) == 0:
-                crop_weights = [1.0] * len(crop_dirs)
+            crop_weights = [1.0] * len(crop_dirs)
             crop_dirs_weights = list(zip(crop_dirs, crop_weights))
             crop_dirs_weights.sort(key=lambda x: x[1], reverse=True)
             crop_dirs, crop_weights = zip(*crop_dirs_weights) if crop_dirs_weights else ([], [])
@@ -111,14 +93,12 @@ class DALESDataset:
             for d in sampled_crops:
                 if (d / f"{base_resolution}.pt").exists():
                     self.crops.append(d.name)
-                    self.crop_sampling_weights.append(veg_weight_for.get(d.name, 1.0))
 
         if not self.crops:
             pass  # RuntimeError raised below
 
-        using_veg = veg_weights_by_tile is not None
-        print(f"Sampling {len(self.crops)} crops among {total_of_crops}."
-              + (" (vegetation-biased sampling)" if using_veg else " (uniform sampling)"))
+
+        print(f"Sampling {len(self.crops)} crops among {total_of_crops}.")
 
         if not self.crops:
             raise RuntimeError(
@@ -209,7 +189,7 @@ class DALESDataset:
 
     def sample_crop_ids(self, batch_size: int) -> List[str]:
         """Sample batch_size crop IDs with replacement, biased toward low-vegetation crops."""
-        return random.choices(self.crops, weights=self.crop_sampling_weights, k=batch_size)
+        return random.choices(self.crops, k=batch_size)
 
     def sample_batch(
         self,

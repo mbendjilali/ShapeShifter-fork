@@ -130,7 +130,7 @@ def _train_dales(args, cfg, device='cuda'):
     sys.path.insert(0, './src')
     from dataset.dales_dataset import DALESDataset, clip_data_per_element
 
-    manifest = cfg.get("manifest_path", "data/dales_manifest.json")
+    manifest = cfg.get("manifest_path", "data/dales_manifest.yaml")
 
     dataset = DALESDataset(manifest,
                            split="train",
@@ -177,6 +177,7 @@ def _train_dales(args, cfg, device='cuda'):
         max_T=cfg.get("max_T", None) if args.level > 0 else None,
         n_classes = cfg["n_classes"],
         model_upsampler=model_upsampler,
+        weight=torch.tensor(cfg["class_weight"], device='cuda'),
     ).cuda()
 
     n_epochs = cfg["epochs"]
