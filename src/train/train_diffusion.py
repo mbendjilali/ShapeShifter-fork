@@ -14,6 +14,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch
+from torch.utils.tensorboard import SummaryWriter
 import yaml
 import os
 
@@ -192,6 +193,8 @@ def _train_dales(args, cfg, device='cuda'):
     BCE_LOSS_EMA = None
     current_time = datetime.today().strftime('%d-%m-%H:%M')
 
+    writer = SummaryWriter(log_dir=f"runs/diffusion_level_{args.level}_{current_time}")
+
     loader = _PrefetchLoader(
         dataset, "train", args.level, batch_size, device, capacity=2
     ).start()
@@ -227,6 +230,9 @@ def _train_dales(args, cfg, device='cuda'):
 
             epoch_mse_loss = epoch_mse_loss_sum / steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / steps_per_epoch
+            writer.add_scalar('Loss/train_MSE', epoch_mse_loss, epoch)
+            writer.add_scalar('Loss/train_BCE', epoch_bce_loss, epoch)
+            writer.add_scalar('Loss/train_total', epoch_mse_loss + epoch_bce_loss, epoch)
             MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
             MSE_L.append(MSE_LOSS_EMA)
@@ -241,9 +247,12 @@ def _train_dales(args, cfg, device='cuda'):
                 if val_mse_loss is not None:
                     VAL_MSE_L.append((epoch, val_mse_loss.item()))
                     val_suffix += f", val_mse_loss={val_mse_loss:.4f}"
+                    writer.add_scalar('Loss/val_MSE', val_mse_loss.item(), epoch)
                 if val_bce_loss is not None:
                     VAL_BCE_L.append((epoch, val_bce_loss.item()))
                     val_suffix += f" + val_bce_loss={val_bce_loss:.4f}"
+                    writer.add_scalar('Loss/val_BCE', val_bce_loss.item(), epoch)
+                    writer.add_scalar('Loss/val_total', val_mse_loss.item() + val_bce_loss.item(), epoch)
 
             # Update tqdm with current losses
             tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" + val_suffix)
@@ -268,6 +277,9 @@ def _train_dales(args, cfg, device='cuda'):
 
         ckpt = 'checkpoints/diffusion_models/dales_{}_{}.pt'.format(args.level, current_time)
         torch.save(diffusion, ckpt)
+
+        writer.close()
+
         print(ckpt)
 
 

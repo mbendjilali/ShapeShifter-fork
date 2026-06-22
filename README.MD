@@ -100,6 +100,45 @@ CUDA_VISIBLE_DEVICES=1 python src/train/train_upsamplers.py \
     -config configs/train_dales_upsampler.yaml -dataset dales -level 1 &
 # … etc.
 ```
+## Visualize results on TensorBoard
+
+Training and validation metrics (MSE, BCE, and total loss) are logged using TensorBoard during training. Each diffusion level writes its logs to a separate directory, allowing independent visualization and comparison.
+
+### 1. Install TensorBoard
+
+```shell
+pip install tensorboard
+pip install setuptools==80.9.0
+```
+
+### 2. Train the model
+Run the training script as usual. During training, TensorBoard log files will be created in the ```runs/``` directory:
+
+runs/
+├── level_0/
+├── level_1/
+├── level_2/
+└── level_3/
+
+Each directory corresponds to one diffusion level.
+
+### 3. Launch TensorBoard
+From the project root directory, start TensorBoard:
+
+```shell
+tensorboard --logdir checkpoints --port 6006
+```
+
+Then, from your computer, create a SSH tunnel:
+
+```shell
+ssh -L 6006:localhost:6006 <user_name>@<remote_server>
+```
+
+And open the following address in the browser:
+
+http://localhost:6006
+
 
 ## Generation
 
