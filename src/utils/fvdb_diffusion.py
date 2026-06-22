@@ -65,6 +65,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # proposed in the paper, summed to time_next
         # as a way to fix a deficiency in self-conditioning and lower FID when the number of sampling timesteps is < 400
         self.time_difference = time_difference
+        self.n_classes = n_classes
         self.MSEloss = nn.functional.mse_loss
         self.BCEloss = nn.functional.binary_cross_entropy_with_logits
 
@@ -82,6 +83,12 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         times = times.unbind(dim=-1)
         return times
 
+    def _sigmoid_semantic_channels(self, x: fvnn.VDBTensor) -> None:
+        """Convert BCE-trained semantic logits to probabilities in-place."""
+        n_cls = getattr(self, 'n_classes', None)
+        if n_cls:
+            x.data.jdata[:, 5:5 + n_cls] = torch.sigmoid(x.data.jdata[:, 5:5 + n_cls])
+
     @torch.no_grad()
     def ddpm_sample(self, noisy_grid: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None, clip=None):
 
@@ -94,6 +101,9 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
 
             # get predicted x0
             x_start = self.model(noisy_grid, time.repeat(len(noisy_grid.jidx)))
+            # semantic channels were trained with BCE (logits); convert to probabilities
+            # before using x_start in the denoising formula to stay in-distribution
+            self._sigmoid_semantic_channels(x_start)
             if not clip is None:
                 x_start.data.jdata = torch.clip(x_start.jdata, -clip, clip)
             if time_next == 0:
@@ -147,6 +157,8 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
             # predict x0
             x_start = self.model(
                 noisy_grid, times.repeat(len(noisy_grid.jidx)))
+            # semantic channels were trained with BCE (logits); convert to probabilities
+            self._sigmoid_semantic_channels(x_start)
             if times_next == 0:
                 return x_start
 

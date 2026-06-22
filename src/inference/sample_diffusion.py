@@ -83,6 +83,11 @@ def load_dales_diffusion(level, src):
         raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
     models.sort()
     diffusion = torch.load(models[-1], weights_only=False)
+    # Patch checkpoints saved before self.n_classes was stored: infer n_classes from the
+    # model's output channel count so that _sigmoid_semantic_channels applies correctly.
+    if not hasattr(diffusion, 'n_classes'):
+        total = getattr(diffusion.model, 'out_channels', None)
+        diffusion.n_classes = (total - 6) if total == 14 else None
     diffusion.eval()
     return diffusion
 
