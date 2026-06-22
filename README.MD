@@ -128,7 +128,7 @@ Each directory corresponds to one diffusion level.
 From the project root directory, start TensorBoard:
 
 ```shell
-tensorboard --logdir checkpoints --port 6006
+tensorboard --logdir runs --port 6006
 ```
 
 Then, from your computer, create a SSH tunnel:
