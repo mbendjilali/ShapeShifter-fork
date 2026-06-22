@@ -5,9 +5,8 @@ Feature layout (Route A, 10 channels, slices unchanged from DiffusionTensor):
   [0:3]  PCA normal per voxel (smallest eigenvector of intra-voxel covariance)
   [3:6]  local offset = (mean_pt − voxel_center) / voxel_size  [INVARIANT]
   [6]    intensity normalised to [0, 1]
-  [7]    height above ground normalised to [0, 1]  (clipped at MAX_HEIGHT_M)
-  [8]    semantic class: (sem_class − 1) / (N_CLASSES − 1)  ∈ [0, 1]
-  [9]    mask = 1  [INVARIANT]
+  [7]    semantic class: (sem_class − 1) / (N_CLASSES − 1)  ∈ [0, 1]
+  [8]    mask = 1  [INVARIANT]
 
 Voxel sizes per level (50×50m crop):
   256.pt  0.2 m/voxel  (~250 × 250 in XY)
@@ -18,10 +17,6 @@ Voxel sizes per level (50×50m crop):
 
 Level 0 dense base at 16.pt: ~16 × 16 × 11 ≈ 2 800 voxels
 vs. the old full-tile approach: 16 × 16 × 3 ≈ 800 voxels at 32 m/voxel.
-
-Terrain detrending (invariant #5): DTM computed on the FULL tile (better coverage),
-  then applied per crop. Each crop coordinate origin is shifted to (0, 0) in XY
-  so voxel indices start near 0 regardless of the tile's position in the tile grid.
 
 Crop naming: {tile_id}_x{x_start:04d}_y{y_start:04d}
   e.g. data/GT_sparse_tensors/dales/5080_54435_x0000_y0050/256.pt
@@ -85,59 +80,6 @@ def load_dales_laz(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     intensity = np.asarray(las.intensity[:], dtype=np.float32) / 65535.0
     return xyz, sem, intensity
 
-
-# ---------------------------------------------------------------------------
-# Terrain detrending
-# ---------------------------------------------------------------------------
-
-def build_dtm_interpolator(cfg, xyz: np.ndarray, sem: np.ndarray):
-    """
-    Build a (x, y) → ground_z bilinear interpolator from ground points.
-    Best called on the FULL tile before cropping so the DTM has dense coverage.
-    """
-    gp = xyz[sem == cfg["ground_class"]]
-    if len(gp) == 0:
-        z_fallback = float(xyz[:, 2].min())
-        return lambda pts: np.full(len(pts), z_fallback, dtype=np.float32)
-
-    x0, y0 = float(xyz[:, 0].min()), float(xyz[:, 1].min())
-    nx = int(np.ceil((xyz[:, 0].max() - x0) / cfg["dtm_cell_m"])) + 2
-    ny = int(np.ceil((xyz[:, 1].max() - y0) / cfg["dtm_cell_m"])) + 2
-
-    dtm = np.full((nx, ny), np.nan, dtype=np.float64)
-
-    gi = np.clip(((gp[:, 0] - x0) / cfg["dtm_cell_m"]).astype(int), 0, nx - 1)
-    gj = np.clip(((gp[:, 1] - y0) / cfg["dtm_cell_m"]).astype(int), 0, ny - 1)
-
-    flat   = gi * ny + gj
-    order  = np.argsort(flat)
-    flat_s, z_s = flat[order], gp[:, 2][order]
-    unique, first = np.unique(flat_s, return_index=True)
-    ends   = np.append(first[1:], len(flat_s))
-    for uid, s, e in zip(unique, first, ends):
-        xi, yi = divmod(int(uid), ny)
-        dtm[xi, yi] = z_s[s:e].min()
-
-    nan_mask = np.isnan(dtm)
-    if nan_mask.any():
-        _, (ri, ci) = distance_transform_edt(nan_mask, return_indices=True)
-        dtm[nan_mask] = dtm[ri[nan_mask], ci[nan_mask]]
-
-    dtm = gaussian_filter(dtm, sigma=cfg["dtm_sigma"])
-
-    xi_vals = x0 + np.arange(nx) * cfg["dtm_cell_m"]
-    yi_vals = y0 + np.arange(ny) * cfg["dtm_cell_m"]
-    interp  = RegularGridInterpolator(
-        (xi_vals, yi_vals), dtm,
-        method="linear", bounds_error=False, fill_value=None,
-    )
-
-    def query(pts: np.ndarray) -> np.ndarray:
-        return interp(pts[:, :2]).astype(np.float32)
-
-    return query
-
-
 # ---------------------------------------------------------------------------
 # fVDB grid — metric, no NDCnormalize
 # ---------------------------------------------------------------------------
@@ -160,10 +102,9 @@ def aggregate_voxels(
     xyz:       np.ndarray,   # (N,3) detrended, XY origin-shifted
     sem:       np.ndarray,   # (N,)  uint8 1–8
     intensity: np.ndarray,   # (N,)  float32 0–1
-    height:    np.ndarray,   # (N,)  float32 0–1
 ):
     """
-    Returns (grid, mean_xyz, pca_normals, mean_intensity, mean_height, class_norm)
+    Returns (grid, mean_xyz, pca_normals, mean_intensity, class_norm)
     all arrays shape (V, *).
     """
     grid    = build_metric_grid(xyz, cfg["voxel_size_initial"], cfg["device"])
@@ -191,7 +132,6 @@ def aggregate_voxels(
         return (s / count.clamp(min=1)).numpy().astype(np.float32)
 
     mean_intensity = scatter_mean_1d(intensity)
-    mean_height    = scatter_mean_1d(height)
 
     sem_t = torch.nn.functional.one_hot(
         torch.tensor(sem.astype(np.int64) - 1, dtype=torch.long),
@@ -201,7 +141,7 @@ def aggregate_voxels(
     cc = torch.zeros(V, cfg["n_classes"]).scatter_add_(
         0, vids.unsqueeze(1).expand(-1, cfg["n_classes"]), sem_t)
 
-    return grid, mean_xyz, mean_intensity, mean_height, cc
+    return grid, mean_xyz, mean_intensity, cc
 
 # ---------------------------------------------------------------------------
 # Core encoding from already-detrended, XY-origin-shifted points
@@ -219,31 +159,28 @@ def _encode_points(
     save_dir.mkdir(parents=True, exist_ok=True)
     device = cfg["device"]
     voxel_size = cfg["voxel_size_initial"]
-    height = np.clip(xyz[:, 2], 0.0, cfg["max_height_m"]) / cfg["max_height_m"]
 
-    grid, mean_xyz, mean_int, mean_h, cc = aggregate_voxels(cfg, xyz, sem, intensity, height)
+    grid, mean_xyz, mean_int, cc = aggregate_voxels(cfg, xyz, sem, intensity)
 
     mean_xyz_t = torch.tensor(mean_xyz, dtype=torch.float32, device=device)
     voxel_centers = grid.grid_to_world(grid.ijk.float()).jdata
     local_offset = (mean_xyz_t - voxel_centers) / voxel_size
 
     int_t = torch.tensor(mean_int, dtype=torch.float32, device=device).unsqueeze(1)
-    h_t   = torch.tensor(mean_h,   dtype=torch.float32, device=device).unsqueeze(1)
     cc_t  = cc.to(device)
 
-    # Pool [local_offset(3), intensity(1), height(1), cc(n_classes)] together.
+    # Pool [local_offset(3), intensity(1), cc(n_classes)] together.
     # avg_pool on cc preserves the argmax → correct majority class at every level.
-    feat = torch.cat([local_offset, int_t, h_t, cc_t], dim=1)
+    feat = torch.cat([local_offset, int_t, cc_t], dim=1)
     feat_jt = fvdb.JaggedTensor([feat])
 
     def _to_dt(g, f):
         lo      = f[:, :3]
         intens  = f[:, 3:4]
-        ht      = f[:, 4:5]
-        cc_f    = f[:, 5:]
+        cc_f    = f[:, 4:]
         total   = cc_f.sum(1, keepdim=True).clamp(min=1e-6)
         class_probs = cc_f / total
-        features  = torch.cat([intens, ht, class_probs], dim=1)   # (V, 10)
+        features  = torch.cat([intens, class_probs], dim=1)   # (V, 10)
         mask    = torch.ones(len(f), 1, device=device)
         return DiffusionTensor.get_tensor_from_data(g, lo, features, mask)
 
@@ -308,9 +245,6 @@ def encode_tile_as_crops(
     """
     Encode a DALES LAZ tile as a grid of 50×50m crops.
 
-    DTM is computed on the full tile for robustness, then each crop is
-    detrended and voxelised independently.
-
     Returns the list of crop IDs that were saved.
     """
     tile_id = laz_path.stem
@@ -323,21 +257,12 @@ def encode_tile_as_crops(
               f"  Y=[{xyz[:,1].min():.0f},{xyz[:,1].max():.0f}]"
               f"  Z=[{xyz[:,2].min():.1f},{xyz[:,2].max():.1f}]")
 
-    # Build DTM on full tile (better coverage than per-crop)
-    if verbose:
-        print("  Building DTM …")
-    dtm_fn = build_dtm_interpolator(cfg, xyz, sem)
 
-    # Detrend the whole tile at once
-    ground_z = dtm_fn(xyz)
-    xyz_d = xyz.copy()
-    xyz_d[:, 2] -= ground_z
-
-    crop_origins = _crop_ids(cfg, xyz_d)
+    crop_origins = _crop_ids(cfg, xyz)
     saved_ids = []
 
     for x_start, y_start in tqdm(crop_origins, desc="Extracting crops"):
-        xyz_c, sem_c, int_c = _extract_crop(cfg, xyz_d, sem, intensity, x_start, y_start)
+        xyz_c, sem_c, int_c = _extract_crop(cfg, xyz, sem, intensity, x_start, y_start)
         if len(xyz_c) < cfg["min_points_per_crop"]:
             continue
 
@@ -399,20 +324,16 @@ def encode_tile_as_crops_augmented(
       {tile_id}_x{X}_y{Y}_r{angle}_f{axis}/
 
     Invariant #4 respected: rotation/flip applied at raw point level before voxelisation.
-    DTM is computed ONCE on the full tile.
     """
     tile_id = laz_path.stem
     if verbose:
         print(f"[pc_encoding/aug] {tile_id}")
 
     xyz, sem, intensity = load_dales_laz(laz_path)
-    dtm_fn   = build_dtm_interpolator(xyz, sem)
-    ground_z = dtm_fn(xyz)
-    xyz_d    = xyz.copy(); xyz_d[:, 2] -= ground_z
-    crop_origins = _crop_ids(cfg, xyz_d)
+    crop_origins = _crop_ids(cfg, xyz)
 
     for x_start, y_start in crop_origins:
-        xyz_c, sem_c, int_c = _extract_crop(cfg, xyz_d, sem, intensity, x_start, y_start)
+        xyz_c, sem_c, int_c = _extract_crop(cfg, xyz, sem, intensity, x_start, y_start)
         if len(xyz_c) < cfg["min_points_per_crop"]:
             continue
         base_id = f"{tile_id}_x{int(x_start):04d}_y{int(y_start):04d}"
@@ -451,7 +372,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
     g = dt.get_global().remove_mask()
     positions, features, _ = DiffusionTensor.get_feature_data(g.jdata)
     positions   = positions.cpu().detach().numpy()
-    class_probs = features[:, 2:].cpu().detach().numpy()
+    class_probs = features[:, 1:].cpu().detach().numpy()
     class_idx   = class_probs.argmax(axis=-1).clip(0, 7)
     rgb         = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / 7.0
     normals_n   = np.zeros_like(positions)

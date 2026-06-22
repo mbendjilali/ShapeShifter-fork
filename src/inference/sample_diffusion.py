@@ -83,11 +83,7 @@ def load_dales_diffusion(level, src):
         raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
     models.sort()
     diffusion = torch.load(models[-1], weights_only=False)
-    # Patch checkpoints saved before self.n_classes was stored: infer n_classes from the
-    # model's output channel count so that _sigmoid_semantic_channels applies correctly.
-    if not hasattr(diffusion, 'n_classes'):
-        total = getattr(diffusion.model, 'out_channels', None)
-        diffusion.n_classes = (total - 6) if total == 14 else None
+
     diffusion.eval()
     return diffusion
 
@@ -98,7 +94,7 @@ def compute_all_generations_dales(
     extent_m=100.0,
     max_level=4,
     eval_batch_size=5,
-    features=14,
+    features=None,
     ddim_steps=None,
     verbose=False,
     nz=8,
@@ -222,7 +218,7 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
     Export a DALES generation batch as PLY, coloured by semantic class.
 
     Channels layout: [0:3] normals, [3:6] offset (→ position), [6] intensity,
-                     [7] height, [8] sem_class_norm (0–1), mask already removed.
+                    [7] sem_class_norm (0–1), mask already removed.
     """
     for ind in range(generated_X.grid_count):
         g = DiffusionTensor(
@@ -236,8 +232,8 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
             continue
 
         positions_np = positions.cpu().numpy()
-        colors_np    = colors.cpu().numpy()     # (V, 10): [intensity, height, class_probs(8)]
-        class_idx    = colors_np[:, 2:].argmax(axis=-1).clip(0, 7)
+        colors_np    = colors.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
+        class_idx    = colors_np[:, 1:].argmax(axis=-1).clip(0, 7)
         rgb          = _DALES_PALETTE[class_idx]
 
         normals_np   = np.zeros_like(positions_np)

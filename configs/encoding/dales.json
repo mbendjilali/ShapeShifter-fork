@@ -19,10 +19,6 @@
 
   "ground_class": 1,
   "n_classes": 8,
-  "max_height_m": 50.0,
-
-  "dtm_cell_m": 10.0,
-  "dtm_sigma": 2.0,
 
   "min_points_per_crop": 500,
   "device": "cuda"

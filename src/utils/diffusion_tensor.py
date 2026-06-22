@@ -41,11 +41,10 @@ def blur_tensor(X, iterations=1, blur_kernel=9):
 
 class DiffusionTensor(fvdb.nn.VDBTensor):
     """
-    Feature layout: [offset(3), intensity(1), height(1), class_probs(8), mask(1)] = 14 channels
+    Feature layout: [offset(3), intensity(1), class_probs(8), mask(1)] = 13 channels
 
     offset      — local sub-voxel offset, normalised by voxel size
     intensity   — mean LiDAR intensity in [0, 1]
-    height      — height above ground in [0, 1]
     class_probs — soft semantic class distribution (sums to ~1 per voxel)
     mask        — occupancy: 1 for real voxels, -1 for empty slots in dense grids
     """
@@ -56,7 +55,7 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
 
     @staticmethod
     def get_feature_data(jdata):
-        """Returns (offset, features, mask) where features = [intensity, height, class_probs]."""
+        """Returns (offset, features, mask) where features = [intensity, class_probs]."""
         offset = jdata[:, :3]
         features = jdata[:, 3:-1]
         mask   = jdata[:, -1:]
