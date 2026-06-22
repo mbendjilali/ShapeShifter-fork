@@ -11,10 +11,12 @@ layers: 2
 first_ks: 3
 one_layers: 4
 features: 128
-epochs: 100
+epochs: 300
+
+n_classes: 8
 
 lr: 0.0001
-batch_size: 2
+batch_size: 1
 clip_size: 20
 
 dropout: 0.05

@@ -242,17 +242,19 @@ def _train_dales(args, cfg, device='cuda'):
 
             # Update tqdm with current losses
             tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" +
-                       (f", val_loss={val_mse_loss + val_bce_loss:.4f}" if val_dataset is not None else ""))
+                       (f", val_mse_loss={val_mse_loss:.4f} + val_bce_loss={val_bce_loss:.4f}" if val_dataset is not None else ""))
 
             if epoch % save_every == 0 or epoch == n_epochs - 1:
                 plt.clf()
+                # train losses
                 plt.plot(MSE_L, label='train_mse_ema')
-                if VAL_MSE_L:
+                plt.plot(BCE_L, label='train_bce_ema')
+                # val losses
+                if VAL_MSE_L and VAL_BCE_L:
                     plt.plot([v[0] for v in VAL_MSE_L], [v[1] for v in VAL_MSE_L],
-                             label='MSE', linestyle='--')
-                if VAL_BCE_L:
+                             label='Val_MSE', linestyle='--')
                     plt.plot([v[0] for v in VAL_BCE_L], [v[1] for v in VAL_BCE_L],
-                             label='BCE', linestyle='--')
+                             label='Val_BCE', linestyle='--')
                 plt.xlabel('epoch')
                 plt.yscale('log')
                 plt.legend()

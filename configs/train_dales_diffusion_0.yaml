@@ -10,7 +10,7 @@ layers: 3
 first_ks: 3
 one_layers: 6
 features: 256
-epochs: 100
+epochs: 300
 
 n_classes: 8
 
