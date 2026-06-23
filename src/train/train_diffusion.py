@@ -177,7 +177,7 @@ def _train_dales(args, cfg, device='cuda'):
         max_T=cfg.get("max_T", None) if args.level > 0 else None,
         n_classes = cfg["n_classes"],
         model_upsampler=model_upsampler,
-        weight=torch.tensor(cfg["class_weight"], device='cuda'),
+        weight=torch.tensor(cfg["class_weight"], device='cuda') if "class_weight" in cfg else None,
     ).cuda()
 
     n_epochs = cfg["epochs"]
@@ -275,13 +275,7 @@ def _train_dales(args, cfg, device='cuda'):
                         best_val_loss = val_total_loss
                         best_epoch = epoch
                         best_ckpt = f"checkpoints/diffusion_models/dales_{args.level}_{current_time}_best.pt"
-                        torch.save(
-                            {"epoch": epoch, 
-                            "model_state_dict": diffusion.model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "best_val_loss": best_val_loss,
-                            "config": cfg,},
-                        best_ckpt)
+                        torch.save(diffusion, best_ckpt)
                         print(
                             f"New best model saved at epoch {epoch}: {best_ckpt}"
                             f"Validation loss: {best_val_loss:.4f} (MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")

@@ -14,17 +14,18 @@ features: 128
 epochs: 300
 
 n_classes: 8
-class_weight: [0.1, 0.05, 2.0, 2.0, 1.0, 2.0, 2.0, 0.2]
+class_weight: [0.5, 0.2, 2.0, 2.0, 1.0, 5.0, 10.0, 0.5]
+
 
 
 lr: 0.0001
-batch_size: 8
+batch_size: 16
 clip_size: 20
 
 dropout: 0.05
 time_emb: 6
 diffusion_timesteps: 1000
 max_T: 500
-save_every: 30
-val_every: 60
+save_every: 10
+val_every: 2
 val_crops: 32

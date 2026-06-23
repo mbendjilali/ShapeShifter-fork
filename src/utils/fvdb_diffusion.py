@@ -63,13 +63,12 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         if max_T is None:
             max_T = timesteps
         self.max_T = max_T
-        # proposed in the paper, summed to time_next
-        # as a way to fix a deficiency in self-conditioning and lower FID when the number of sampling timesteps is < 400
         self.time_difference = time_difference
         self.n_classes = n_classes
-        self.MSEloss = nn.functional.mse_loss
-        self.BCEloss = nn.functional.binary_cross_entropy_with_logits
-        self.weight = weight
+        if weight is not None:
+            self.register_buffer('class_weight', weight.float())
+        else:
+            self.class_weight = None
 
     @property
     def device(self):
@@ -86,10 +85,10 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         return times
 
     def _sigmoid_semantic_channels(self, x: fvnn.VDBTensor) -> None:
-        """Convert BCE-trained semantic logits to probabilities in-place."""
+        """Convert CE-trained class logits to probabilities in-place (for sampling)."""
         n_cls = getattr(self, 'n_classes', None)
         if n_cls:
-            x.data.jdata[:, 4:4 + n_cls] = torch.sigmoid(x.data.jdata[:, 4:4 + n_cls])
+            x.data.jdata[:, 4:4 + n_cls] = torch.softmax(x.data.jdata[:, 4:4 + n_cls], dim=-1)
 
     @torch.no_grad()
     def ddpm_sample(self, noisy_grid: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None, clip=None):
@@ -196,7 +195,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         noised_img = alpha[:, None] * target_X + sigma[:, None] * noise
         return fvnn.VDBTensor(grid=X.grid, data=X.grid.jagged_like(noised_img)), target_X
 
-    def forward(self, X: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None, weight: torch.tensor = None):
+    def forward(self, X: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None):
 
         # random times
         times = torch.zeros((X.grid_count,), device=self.device).float().uniform_(
@@ -207,13 +206,47 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
 
         # prediction
         pred: fvnn.VDBTensor = self.model(noisy_latents, times)
-        
-        mse_pred = torch.cat([pred.jdata[:, :4], pred.jdata[:, -1:]], dim=1)
-        mse_target = torch.cat([X.jdata[:, :4], X.jdata[:, -1:]], dim=1)
-        mse_loss = self.MSEloss(mse_pred, mse_target)
 
-        class_pred = pred.jdata[:, 4:-1]
-        class_target = X.jdata[:, 4:-1]
-        class_loss = self.BCEloss(class_pred, class_target, weight=self.weight)
-        # return self.loss(pred.jdata, target_X)
+        mask = X.jdata[:, -1]
+        is_occupied = mask > 0
+        n_occ   = is_occupied.float().sum().clamp(min=1)
+        n_empty = (~is_occupied).float().sum().clamp(min=1)
+        n_total = float(X.jdata.shape[0])
+        w_occ, w_emp = n_total / (2.0 * n_occ), n_total / (2.0 * n_empty)
+
+        ratio = (n_empty / n_occ).clamp(max=4.0).sqrt()   # gentle, not full balance
+        w_occ, w_emp = ratio, 1.0
+        mask_weights = torch.where(is_occupied, w_occ, w_emp)
+        mask_loss = (((pred.jdata[:, -1] - mask) ** 2) * mask_weights).mean()
+
+        # --- Geometry MSE (offset + intensity) — occupied voxels only, class-weighted ---
+        geom_pred   = pred.jdata[:, :4]
+        geom_target = X.jdata[:, :4]
+        if is_occupied.any():
+            gp = geom_pred[is_occupied]
+            gt = geom_target[is_occupied]
+            if self.class_weight is not None:
+                gt_class = X.jdata[is_occupied, 4:-1].argmax(dim=-1)
+                w = self.class_weight[gt_class]
+                per_voxel = ((gp - gt) ** 2).mean(dim=-1)
+                geom_loss = (per_voxel * w).sum() / w.sum().clamp(min=1)
+            else:
+                geom_loss = F.mse_loss(gp, gt)
+        else:
+            geom_loss = geom_pred.sum() * 0.0
+
+        mse_loss = geom_loss + mask_loss
+
+        # --- Class loss — softmax CE on occupied voxels only, class-weighted ---
+        class_pred = pred.jdata[:, 4:-1]    # (N, C) logits
+        if is_occupied.any():
+            gt_hard = X.jdata[is_occupied, 4:-1].argmax(dim=-1)    # (N_occ,) hard labels
+            class_loss = F.cross_entropy(
+                class_pred[is_occupied],
+                gt_hard,
+                weight=self.class_weight,
+            )
+        else:
+            class_loss = class_pred.sum() * 0.0
+
         return mse_loss, class_loss
