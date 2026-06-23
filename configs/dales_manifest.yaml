@@ -1,5 +1,5 @@
 dales_root: /data/moussabendjilali/archive/data/dales_2
-gt_root: data/dales
+gt_root: data_no_veg
 
 voxel_size_levels:
   "512": 0.2
@@ -13,7 +13,6 @@ ground_class: 1
 
 classes:
   "1": Ground
-  "2": Vegetation
   "3": Cars
   "4": Trucks
   "5": PowerLines
@@ -23,7 +22,6 @@ classes:
 
 sampling_ratio: 1.0
 common_sampling_ratio: 1.0
-
 
 train:
   - id: "5080_54435"
