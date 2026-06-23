@@ -207,7 +207,6 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # prediction
         pred: fvnn.VDBTensor = self.model(noisy_latents, times)
 
-<<<<<<< Updated upstream
         mask = X.jdata[:, -1]
         is_occupied = mask > 0
         n_occ   = is_occupied.float().sum().clamp(min=1)
@@ -250,15 +249,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         else:
             class_loss = class_pred.sum() * 0.0
 
-        return mse_loss, class_loss
-=======
-        class_pred = pred.jdata[:, 4:-1]
-        class_target = X.jdata[:, 4:-1]
-        class_loss = self.BCEloss(class_pred, class_target, weight=self.weight)
-        # return self.loss(pred.jdata, target_X)
+        pred_label = pred.jdata[:, 4:-1].argmax(dim=-1)
+        target_label = X.jdata[:, 4:-1].argmax(dim=-1)
 
-        pred_label = pred.jdata[:, 4:-1]
-        target_label = X.jdata[:, 4:-1]
-        
         return mse_loss, class_loss, pred_label, target_label
->>>>>>> Stashed changes

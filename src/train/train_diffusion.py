@@ -251,12 +251,6 @@ def _train_dales(args, cfg, device='cuda'):
                  "BCE": epoch_bce_loss,
                  "Total": epoch_mse_loss + epoch_bce_loss,
                 }, epoch)
-            writer.add_scalars(
-                "Loss/train_EMA",
-                {"MSE": MSE_LOSS_EMA,
-                 "BCE": BCE_LOSS_EMA,
-                 "Total": MSE_LOSS_EMA + BCE_LOSS_EMA,
-                }, epoch)
             writer.add_scalar("Train mIoU", epoch_miou, epoch)
 
             val_suffix = ""
@@ -268,9 +262,10 @@ def _train_dales(args, cfg, device='cuda'):
                 val_total_loss = val_mse_loss.item() + val_bce_loss.item()
                 if val_mse_loss is not None and val_bce_loss is not None:
                     VAL_MSE_L.append((epoch, val_mse_loss.item()))
-                    val_suffix += f", val_mse_loss={val_mse_loss:.4f}"
+                    val_suffix += f", Val MSE={val_mse_loss:.4f}"
                     VAL_BCE_L.append((epoch, val_bce_loss.item()))
-                    val_suffix += f" + val_bce_loss={val_bce_loss:.4f}"
+                    val_suffix += f" + Val BCE={val_bce_loss:.4f}"
+                    val_suffix += f" | Val mIoU={val_miou:.4f}"
                     writer.add_scalars(
                         'Loss/Val', 
                         {"Val_MSE": val_mse_loss.item(),
@@ -278,6 +273,7 @@ def _train_dales(args, cfg, device='cuda'):
                          "Val_Total": val_total_loss,
                         }, epoch
                     )
+                    writer.add_scalar("Val mIoU", val_miou, epoch)
 
                     if val_total_loss < best_val_loss:
                         best_val_loss = val_total_loss
@@ -295,7 +291,8 @@ def _train_dales(args, cfg, device='cuda'):
 
 
             # Update tqdm with current losses
-            tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" + val_suffix)
+            tqdm.write(f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | BCE={epoch_bce_loss:.4f} | mIoU={epoch_miou:.4f}\n" 
+                       + val_suffix)
 
             if epoch % save_every == 0 or epoch == n_epochs - 1:
                 plt.clf()

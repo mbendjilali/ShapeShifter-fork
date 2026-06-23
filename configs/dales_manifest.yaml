@@ -21,7 +21,7 @@ classes:
   "7": Poles
   "8": Buildings
 
-sampling_ratio: 0.3
+sampling_ratio: 0.1
 common_sampling_ratio: 0.1
 
 
