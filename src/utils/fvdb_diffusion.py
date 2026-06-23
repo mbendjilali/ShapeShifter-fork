@@ -172,6 +172,50 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         return (noisy_grid)
 
     @torch.no_grad()
+    def ddpm_sample_class_clamp(self, noisy_grid, target_class, clamp_clean=False, clip=None):
+        """
+        Diagnostic conditioning. Force every voxel's class channels to `target_class`
+        throughout sampling; let offset/intensity/mask denoise freely.
+        Read out the MASK (occupancy) — not the labels — to see if the model knows
+        what `target_class` geometry looks like.
+        """
+        n_cls = self.n_classes
+        N = noisy_grid.jdata.shape[0]
+        onehot = torch.zeros(N, n_cls, device=self.device)
+        onehot[:, target_class] = 1.0
+        cs, ce = 4, 4 + n_cls
+
+        time_pairs = self.get_sampling_timesteps(1, device=self.device)
+        for time, time_next in tqdm(time_pairs, desc='class-clamped sampling'):
+            time_next = time_next.clamp(min=0.)
+
+            # --- clamp class channels of the INPUT state = the conditioning signal ---
+            if clamp_clean:
+                noisy_grid.data.jdata[:, cs:ce] = onehot                       # strongest, slightly OOD
+            else:
+                a, s = log_snr_to_alpha_sigma(self.log_snr(time))
+                noisy_grid.data.jdata[:, cs:ce] = a * onehot + s * torch.randn_like(onehot)  # in-distribution
+
+            x_start = self.model(noisy_grid, time.repeat(len(noisy_grid.jidx)))
+            self._sigmoid_semantic_channels(x_start)
+            if clip is not None:
+                x_start.data.jdata = torch.clip(x_start.jdata, -clip, clip)
+            if time_next == 0:
+                x_start.data.jdata[:, cs:ce] = onehot   # unambiguous labels for readout
+                return x_start
+
+            log_snr, log_snr_next = self.log_snr(time), self.log_snr(time_next)
+            alpha, sigma = log_snr_to_alpha_sigma(log_snr)
+            alpha_next, sigma_next = log_snr_to_alpha_sigma(log_snr_next)
+            c = -expm1(log_snr - log_snr_next)
+            mean = alpha_next * (noisy_grid.jdata * (1 - c) / alpha + c * x_start.jdata)
+            variance = (sigma_next ** 2) * c
+            noise = torch.randn_like(noisy_grid.jdata)
+            noisy_grid.data.jdata = mean + (0.5 * log(variance)).exp() * noise
+
+        return noisy_grid
+
+    @torch.no_grad()
     def sample(self, noisy_grid: fvnn.VDBTensor):
         return self.ddim_sample(noisy_grid)
 
@@ -225,13 +269,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         if is_occupied.any():
             gp = geom_pred[is_occupied]
             gt = geom_target[is_occupied]
-            if self.class_weight is not None:
-                gt_class = X.jdata[is_occupied, 4:-1].argmax(dim=-1)
-                w = self.class_weight[gt_class]
-                per_voxel = ((gp - gt) ** 2).mean(dim=-1)
-                geom_loss = (per_voxel * w).sum() / w.sum().clamp(min=1)
-            else:
-                geom_loss = F.mse_loss(gp, gt)
+            geom_loss = F.mse_loss(gp, gt)
         else:
             geom_loss = geom_pred.sum() * 0.0
 
@@ -249,7 +287,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         else:
             class_loss = class_pred.sum() * 0.0
 
-        pred_label = pred.jdata[:, 4:-1].argmax(dim=-1)
-        target_label = X.jdata[:, 4:-1].argmax(dim=-1)
+        pred_label = pred.jdata[:, 4:-1]
+        target_label = X.jdata[:, 4:-1]
 
         return mse_loss, class_loss, pred_label, target_label

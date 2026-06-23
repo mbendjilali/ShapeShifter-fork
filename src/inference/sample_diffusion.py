@@ -4,6 +4,7 @@ if True:
 import argparse
 import glob
 import os
+import laspy
 from utils.fvdb_utils import *
 import pymeshlab as ml
 from utils.diffusion_tensor import DiffusionTensor
@@ -132,6 +133,7 @@ def compute_all_generations_dales(
     ddim_steps=None,
     verbose=False,
     nz=8,
+    target_class=None,
 ):
     """
     Unconditional DALES generation: noise → level 0 → … → level max_level.
@@ -140,6 +142,9 @@ def compute_all_generations_dales(
     For 100×100m crops: extent_m=100.0, base_res=16, nz=8
       (voxel_size=6.25m, covers 0..50m at level 0).
     Export point clouds with save_generation_pc.
+
+    target_class: int | None — if set, clamp class channels to this label
+                  throughout sampling (repaint-style conditioning).
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -150,7 +155,9 @@ def compute_all_generations_dales(
     t0 = time.time()
 
     noisy_init = grid_to_VDB(X0G, torch.randn, [features])
-    if ddim_steps is None:
+    if target_class is not None:
+        generated_X = diffusion0.ddpm_sample_class_clamp(noisy_init, target_class)
+    elif ddim_steps is None:
         generated_X = diffusion0.ddpm_sample(noisy_init)
     else:
         generated_X = diffusion0.ddim_sample(
@@ -164,7 +171,8 @@ def compute_all_generations_dales(
         print('LEVEL 0: {:.1f}s'.format(time.time() - t0))
 
     for i in range(1, max_level + 1):
-        generated_X = generate_level_dales(generated_X, i, src, ddim_steps, verbose)
+        generated_X = generate_level_dales(generated_X, i, src, ddim_steps, verbose,
+                                           target_class=target_class)
         # move previous level off GPU before accumulating the new one
         generated_Xs[-1] = generated_Xs[-1].cpu()
         generated_Xs.append(generated_X)
@@ -172,13 +180,16 @@ def compute_all_generations_dales(
     return generated_Xs
 
 
-def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False):
+def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False,
+                         target_class=None):
     """Run one DALES upsampler level."""
     diffusion = load_dales_diffusion(level, src)
     diffusion.eval()
     t0 = time.time()
     new_XT, X_BLUR = generate_input(generated_X, diffusion)
-    if ddim_steps is None:
+    if target_class is not None:
+        generated_X = diffusion.ddpm_sample_class_clamp(new_XT, target_class)
+    elif ddim_steps is None:
         generated_X = diffusion.ddpm_sample(new_XT)
     else:
         generated_X = diffusion.ddim_sample(new_XT, steps=diffusion.max_T // ddim_steps)
@@ -224,32 +235,25 @@ def generate_level(generated_X, i, example_mesh_name, src, ddim_steps=None, verb
 
     return DiffusionTensor.from_vdb(generated_X).remove_mask()
 
+def export_to_laz(positions, intensity, class_idx, save_path):
 
-def export_pc(vstars, normals, colors, save_pc_path=None, save_mesh_path=None, **kwargs):
-    ms = ml.MeshSet()
-    v_colors = np.column_stack((colors, np.ones_like(colors[:, :1])))
-    nmesh = ml.Mesh(vertex_matrix=vstars,
-                    v_normals_matrix=normals, v_color_matrix=v_colors)
-    ms.add_mesh(nmesh)
-    if not save_pc_path is None:
-        ms.save_current_mesh(save_pc_path, save_vertex_normal=False)
+    # Create header and point cloud
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    las = laspy.LasData(header)
 
+    # LAS files use int coordinates with an offset and scale.
+    # For simplicity, use a default scale/offset good for meter coordinates.
+    las.x = positions[:, 0]
+    las.y = positions[:, 1]
+    las.z = positions[:, 2]
+    las.intensity = intensity
+    las.classification = class_idx
 
-_DALES_PALETTE = np.array([
-    [0.50, 0.50, 0.50],  # Ground       — grey
-    [0.13, 0.50, 0.13],  # Vegetation   — green
-    [1.00, 0.20, 0.20],  # Cars         — red
-    [1.00, 0.65, 0.00],  # Trucks       — orange
-    [1.00, 1.00, 0.00],  # PowerLines   — yellow
-    [0.50, 0.00, 0.50],  # Fences       — purple
-    [0.00, 1.00, 1.00],  # Poles        — cyan
-    [0.20, 0.20, 1.00],  # Buildings    — blue
-], dtype=np.float32)
-
+    las.write(save_path)
 
 def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
     """
-    Export a DALES generation batch as PLY, coloured by semantic class.
+    Export a DALES generation batch as LAZ, coloured by semantic class.
 
     Channels layout: [0:3] normals, [3:6] offset (→ position), [6] intensity,
                     [7] sem_class_norm (0–1), mask already removed.
@@ -267,12 +271,11 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
 
         positions_np = positions.cpu().numpy()
         colors_np    = colors.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
+        intensity    = colors_np[:, 1]
         class_idx    = colors_np[:, 1:].argmax(axis=-1).clip(0, 7)
-        rgb          = _DALES_PALETTE[class_idx]
 
-        normals_np   = np.zeros_like(positions_np)
-        ply_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.ply')
-        export_pc(positions_np, normals_np, rgb, save_pc_path=ply_path)
+        laz_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.laz')
+        export_to_laz(positions_np, intensity, class_idx, save_path=laz_path)
 
 
 if __name__ == '__main__':
@@ -294,6 +297,8 @@ if __name__ == '__main__':
     parser.add_argument('-base_res', default=16, type=int)
     parser.add_argument('-nz', default=8, type=int,
                         help='Z voxels at level 0 (DALES 100m crops: 8 → covers 0..50m at 6.25m/vox)')
+    parser.add_argument('-class', dest='target_class', default=None, type=int,
+                        help='Clamp class channels to this label during sampling (0-7, repaint-style)')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -321,8 +326,9 @@ if __name__ == '__main__':
                     ddim_steps=args.ddim_steps,
                     nz=args.nz,
                     verbose=True,
+                    target_class=args.target_class,
                 )
-            print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving PLYs …')
+            print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving LAZs …')
             for level_i, g in enumerate(GX):
                 torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
                 save_dales_pc(g, OUT, level=level_i, min_ind=min_ind)

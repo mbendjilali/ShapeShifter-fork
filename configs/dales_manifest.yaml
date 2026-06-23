@@ -21,8 +21,8 @@ classes:
   "7": Poles
   "8": Buildings
 
-sampling_ratio: 0.1
-common_sampling_ratio: 0.1
+sampling_ratio: 1.0
+common_sampling_ratio: 1.0
 
 
 train:
