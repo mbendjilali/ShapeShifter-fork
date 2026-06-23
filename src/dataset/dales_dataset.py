@@ -26,6 +26,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 
 from diffusion_tensor import DiffusionTensor
+from metrics import miou
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +250,7 @@ class DALESDataset:
     ) -> "DALESDataset":
         return cls(manifest_path, split="test", **kw)
 
-    def compute_val_loss(
+    def compute_val_loss_miou(
         self,
         diffusion,
         split: str,
@@ -264,6 +265,8 @@ class DALESDataset:
         sample_ids = random.sample(self.crops, min(n_crops, len(self.crops)))
         mse_losses = []
         bce_losses = []
+        all_preds_labels = []
+        all_targets_labels = []
         for crop_id in sample_ids:
             if level == 0:
                 if crop_id in self._dense_cache:
@@ -272,17 +275,23 @@ class DALESDataset:
                 else:
                     X0 = self.load_crop_level0(split, crop_id, device)
                 with torch.no_grad():
-                    mse_loss, bce_loss = diffusion(X0)
+                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(X0)
             else:
                 X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
                 with torch.no_grad():
                     X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
                     X0_BLUR.grid = X0.grid
                     x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
-                    mse_loss, bce_loss = diffusion(x0c, blurc)
+                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(x0c, blurc)
             mse_losses.append(mse_loss)
             bce_losses.append(bce_loss)
-        return sum(mse_losses) / len(mse_losses), sum(bce_losses) / len(bce_losses)
+            all_preds_labels.append(pred_labels)
+            all_targets_labels.append(target_labels)
+        all_preds_labels = torch.cat(all_preds_labels, dim=0)
+        all_targets_labels = torch.cat(all_targets_labels, dim=0)
+        val_miou = miou(all_preds_labels, all_targets_labels, num_classes=diffusion.n_classes)
+
+        return sum(mse_losses) / len(mse_losses), sum(bce_losses) / len(bce_losses), val_miou
 
     # ------------------------------------------------------------------
     # Debug / stats

@@ -5,6 +5,7 @@ from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
 from model import DiffusionCNN, count_parameters
+from metrics import miou
 from datetime import datetime
 from pathlib import Path
 import fvdb.nn as fvnn
@@ -208,6 +209,7 @@ def _train_dales(args, cfg, device='cuda'):
         for epoch in trange(n_epochs, desc="Epochs"):
             epoch_mse_loss_sum = 0.0
             epoch_bce_loss_sum = 0.0
+            epoch_miou_sum = 0.0
 
             for _ in range(steps_per_epoch):
                 optimizer.zero_grad()
@@ -215,14 +217,15 @@ def _train_dales(args, cfg, device='cuda'):
 
                 if args.level == 0:
                     X0   = batch
-                    mse_loss, bce_loss = diffusion(X0)
+                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(X0)
                 else:
                     X, X_UP, X0 = batch
                     with torch.no_grad():
                         X0_BLUR = model_upsampler(X, X_UP).detach()
                     X0_BLUR.grid = X0.grid
                     x0c, bc = clip_data_per_element(X0, X0_BLUR, cfg["clip_size"])
-                    mse_loss, bce_loss = diffusion(x0c, bc)
+                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(x0c, bc)
+                    
 
                 loss = mse_loss + bce_loss
                 torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
@@ -231,8 +234,12 @@ def _train_dales(args, cfg, device='cuda'):
                 epoch_mse_loss_sum += mse_loss.item()
                 epoch_bce_loss_sum += bce_loss.item()
 
+                step_miou = miou(pred_labels, target_labels, num_classes=diffusion.n_classes)
+                epoch_miou_sum += step_miou
+
             epoch_mse_loss = epoch_mse_loss_sum / steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / steps_per_epoch
+            epoch_miou = epoch_miou_sum / steps_per_epoch
 
             MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
@@ -250,10 +257,11 @@ def _train_dales(args, cfg, device='cuda'):
                  "BCE": BCE_LOSS_EMA,
                  "Total": MSE_LOSS_EMA + BCE_LOSS_EMA,
                 }, epoch)
+            writer.add_scalar("Train mIoU", epoch_miou, epoch)
 
             val_suffix = ""
             if val_dataset is not None and epoch % val_every == 0:
-                val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
+                val_mse_loss, val_bce_loss, val_miou = val_dataset.compute_val_loss_miou(
                     diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                     clip_size=cfg["clip_size"], device=device,
                 )
@@ -278,9 +286,11 @@ def _train_dales(args, cfg, device='cuda'):
                         torch.save(diffusion, best_ckpt)
                         print(
                             f"New best model saved at epoch {epoch}: {best_ckpt}"
-                            f"Validation loss: {best_val_loss:.4f} (MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")
-                        
+                            f"Validation loss: {best_val_loss:.4f} (MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})"
+                            f"Validation mIoU: {val_miou:.4f}")
                         writer.add_scalar("Best Val Loss", best_val_loss, epoch)
+                    
+                    writer.add_scalar("Val mIoU", val_miou, epoch)
 
 
 
