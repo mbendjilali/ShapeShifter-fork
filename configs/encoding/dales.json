@@ -1,6 +1,6 @@
 {
   "dales_root": "/data/moussabendjilali/archive/data/dales_2",
-  "gt_root": "data/dales",
+  "gt_root": "data_no_veg",
   "crop_size_m": 100.0,
   "crop_stride_m": 100.0,
 
@@ -18,7 +18,7 @@
   "targets": [256, 128, 64, 32, 16],
 
   "ground_class": 1,
-  "n_classes": 8,
+  "n_classes": 7,
 
   "min_points_per_crop": 500,
   "device": "cuda"

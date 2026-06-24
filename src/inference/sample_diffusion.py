@@ -81,7 +81,7 @@ def load_dales_diffusion(level, src):
     # Checkpoints were pickled under old top-level names; remap so unpickling works.
     sys.modules.setdefault('fvdb_diffusion', _fvdb_diffusion)
     sys.modules.setdefault('model', _model)
-    models = glob.glob('{}/dales_{}*.pt'.format(src, level))
+    models = glob.glob('{}/dales_{}*_best.pt'.format(src, level))
     if not models:
         raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
     models.sort(reverse=True)
@@ -129,7 +129,7 @@ def compute_all_generations_dales(
     extent_m=100.0,
     max_level=4,
     eval_batch_size=5,
-    features=13,
+    features=12,
     ddim_steps=None,
     verbose=False,
     nz=8,
@@ -272,7 +272,7 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
         positions_np = positions.cpu().numpy()
         colors_np    = colors.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
         intensity    = colors_np[:, 1]
-        class_idx    = colors_np[:, 1:].argmax(axis=-1).clip(0, 7)
+        class_idx    = colors_np[:, 1:].argmax(axis=-1).clip(0, 6)
 
         laz_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.laz')
         export_to_laz(positions_np, intensity, class_idx, save_path=laz_path)

@@ -43,7 +43,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         max_T=None,
         noise_schedule='cosine',
         time_difference=0.,
-        n_classes=None,
+        n_classes=7,
         model_upsampler=None,
         weight=None,
     ):

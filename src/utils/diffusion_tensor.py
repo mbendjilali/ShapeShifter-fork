@@ -151,11 +151,11 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         feat.jdata[..., -1] = 1
         return DiffusionTensor(new_grid, feat)
 
-    def colored_PC(self, point_size=None, return_plot=True):
+    def colored_PC(self, point_size=None, return_plot=True, n_classes=7):
         offset, features, _ = self.get_feature_data(self.jdata)
         class_probs = features[:, 2:].cpu().detach().numpy()   # (V, 8)
         class_idx   = class_probs.argmax(axis=-1)            # (V,)
-        c = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / 7.0
+        c = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / (n_classes-1)
         vstars = offset.cpu().detach().numpy()
         if return_plot:
             return plot(vstars, c=c, shading={"point_size": point_size})

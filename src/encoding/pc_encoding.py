@@ -78,6 +78,15 @@ def load_dales_laz(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     xyz = np.stack([x, y, z], axis=-1)
     sem = np.asarray(las.legacy_semantic[:], dtype=np.uint8)
     intensity = np.asarray(las.intensity[:], dtype=np.float32) / 65535.0
+
+    keep = sem != 2
+
+    xyz = xyz[keep]
+    sem = sem[keep]
+    intensity = intensity[keep]
+    remap = {1:1, 3:2, 4:3, 5:4, 6:5, 7:6, 8:7}
+    sem = np.array([remap[s] for s in sem], dtype=np.uint8)
+
     return xyz, sem, intensity
 
 # ---------------------------------------------------------------------------
@@ -159,12 +168,6 @@ def _encode_points(
     save_dir.mkdir(parents=True, exist_ok=True)
     device = cfg["device"]
     voxel_size = cfg["voxel_size_initial"]
-
-    keep = sem != 2
-
-    xyz = xyz[keep]
-    sem = sem[keep]
-    intensity = intensity[keep]
 
     grid, mean_xyz, mean_int, cc = aggregate_voxels(cfg, xyz, sem, intensity)
 
