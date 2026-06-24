@@ -2,12 +2,9 @@ dales_root: /data/moussabendjilali/archive/data/dales_2
 gt_root: data/dales
 
 voxel_size_levels:
-  "512": 0.2
   "256": 0.4
   "128": 0.8
   "64": 1.6
-  "32": 3.2
-  "16": 6.4
 
 ground_class: 1
 

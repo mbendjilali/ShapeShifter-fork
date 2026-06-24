@@ -4,12 +4,12 @@ manifest_path: configs/dales_manifest.yaml
 src_path: data/dales
 
 upsample_fac: 2
-base_resolution: 16
+base_resolution: 64
 
 layers: 3
 first_ks: 3
 one_layers: 6
-features: 256
+features: 128
 epochs: 250
 
 n_classes: 8
@@ -17,8 +17,9 @@ class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
 
 
 lr: 0.0001
-batch_size: 16
-clip_size: 20   # unused at level 0 but kept for consistency
+batch_size: 8          # per-GPU micro-batch; effective = batch_size × accumulate_steps
+accumulate_steps: 2    # gradient accumulation steps; effective per-GPU batch = 16
+clip_size: 20
 
 dropout: 0.05
 time_emb: 6

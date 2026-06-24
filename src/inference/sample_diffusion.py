@@ -255,24 +255,23 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
     """
     Export a DALES generation batch as LAZ, coloured by semantic class.
 
-    Channels layout: [0:3] normals, [3:6] offset (→ position), [6] intensity,
-                    [7] sem_class_norm (0–1), mask already removed.
     """
     for ind in range(generated_X.grid_count):
         g = DiffusionTensor(
             generated_X.grid[ind], generated_X.data[ind]
         ).get_global().remove_mask()
 
-        positions, colors, _ = DiffusionTensor.get_feature_data(g.jdata)
+        positions, features, _ = DiffusionTensor.get_feature_data(g.jdata)
 
         if len(positions) == 0:
             print(f'  sample {min_ind + ind} level {level}: void — skipped')
             continue
 
         positions_np = positions.cpu().numpy()
-        colors_np    = colors.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
-        intensity    = colors_np[:, 1]
-        class_idx    = colors_np[:, 1:].argmax(axis=-1).clip(0, 7)
+        features_np    = features.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
+        intensity    = features_np[:, 1]
+        print(intensity)
+        class_idx    = features_np[:, 1:].argmax(axis=-1)
 
         laz_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.laz')
         export_to_laz(positions_np, intensity, class_idx, save_path=laz_path)
@@ -294,7 +293,7 @@ if __name__ == '__main__':
                         help='Crops generated per forward pass')
     parser.add_argument('-total_num', default=20, type=int,
                         help='Total number of crops to generate')
-    parser.add_argument('-base_res', default=16, type=int)
+    parser.add_argument('-base_res', default=64, type=int)
     parser.add_argument('-nz', default=8, type=int,
                         help='Z voxels at level 0 (DALES 100m crops: 8 → covers 0..50m at 6.25m/vox)')
     parser.add_argument('-class', dest='target_class', default=None, type=int,

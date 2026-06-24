@@ -39,7 +39,7 @@ python src/shape_encoding/pc_encoding.py --tile 5080_54435 --export_ply
 from __future__ import annotations
 
 import argparse
-import json
+import yaml
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open(args.config) as f:
-        cfg = json.load(f)
+        cfg = yaml.safe_load(f)
 
     out_root = Path(args.out) / args.split
     laz_dir  = Path(cfg["dales_root"]) / args.split

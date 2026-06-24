@@ -102,8 +102,6 @@ CUDA_VISIBLE_DEVICES=1 python src/train/train_upsamplers.py \
 ```
 ## Visualize results on TensorBoard
 
-Training and validation metrics (MSE, BCE, and total loss) are logged using TensorBoard during training. Each diffusion level writes its logs to a separate directory, allowing independent visualization and comparison.
-
 ### 1. Install TensorBoard
 
 ```shell
