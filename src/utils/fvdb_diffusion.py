@@ -251,43 +251,47 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # prediction
         pred: fvnn.VDBTensor = self.model(noisy_latents, times)
 
-        mask = X.jdata[:, -1]
-        is_occupied = mask > 0
-        n_occ   = is_occupied.float().sum().clamp(min=1)
-        n_empty = (~is_occupied).float().sum().clamp(min=1)
-        n_total = float(X.jdata.shape[0])
-        w_occ, w_emp = n_total / (2.0 * n_occ), n_total / (2.0 * n_empty)
+        # mask = X.jdata[:, -1]
+        # is_occupied = mask > 0
+        # n_occ   = is_occupied.float().sum().clamp(min=1)
+        # n_empty = (~is_occupied).float().sum().clamp(min=1)
+        # n_total = float(X.jdata.shape[0])
+        # w_occ, w_emp = n_total / (2.0 * n_occ), n_total / (2.0 * n_empty)
 
-        ratio = (n_empty / n_occ).clamp(max=4.0).sqrt()   # gentle, not full balance
-        w_occ, w_emp = ratio, 1.0
-        mask_weights = torch.where(is_occupied, w_occ, w_emp)
-        mask_loss = (((pred.jdata[:, -1] - mask) ** 2) * mask_weights).mean()
+        # ratio = (n_empty / n_occ).clamp(max=4.0).sqrt()   # gentle, not full balance
+        # w_occ, w_emp = ratio, 1.0
+        # mask_weights = torch.where(is_occupied, w_occ, w_emp)
+        # mask_loss = (((pred.jdata[:, -1] - mask) ** 2)).mean()
 
         # --- Geometry MSE (offset + intensity) — occupied voxels only, class-weighted ---
-        geom_pred   = pred.jdata[:, :4]
-        geom_target = X.jdata[:, :4]
-        if is_occupied.any():
-            gp = geom_pred[is_occupied]
-            gt = geom_target[is_occupied]
-            geom_loss = F.mse_loss(gp, gt)
-        else:
-            geom_loss = geom_pred.sum() * 0.0
+        geom_pred   = torch.cat([pred.jdata[:, :4], pred.jdata[:, -1][:, None]], dim=1)
+        geom_target = torch.cat([X.jdata[:, :4], X.jdata[:, -1][:, None]], dim=1)
+        mse_loss = F.mse_loss(geom_pred, geom_target)
+        # if is_occupied.any():
+        #     gp = geom_pred[is_occupied]
+        #     gt = geom_target[is_occupied]
+        #     geom_loss = F.mse_loss(gp, gt)
+        # else:
+        #     geom_loss = geom_pred.sum() * 0.0
 
-        mse_loss = geom_loss + mask_loss
+        # mse_loss = geom_loss + mask_loss
 
         # --- Class loss — softmax CE on occupied voxels only, class-weighted ---
         class_pred = pred.jdata[:, 4:-1]    # (N, C) logits
-        if is_occupied.any():
-            gt_hard = X.jdata[is_occupied, 4:-1].argmax(dim=-1)    # (N_occ,) hard labels
-            class_loss = F.cross_entropy(
-                class_pred[is_occupied],
-                gt_hard,
-                weight=self.class_weight,
-            )
-        else:
-            class_loss = class_pred.sum() * 0.0
+        # if is_occupied.any():
+        #     gt_hard = X.jdata[is_occupied, 4:-1].argmax(dim=-1)    # (N_occ,) hard labels
+        #     class_loss = F.cross_entropy(
+        #         class_pred[is_occupied],
+        #         gt_hard,
+        #         weight=self.class_weight,
+        #     )
+        # else:
+        #     class_loss = class_pred.sum() * 0.0
 
         pred_label = pred.jdata[:, 4:-1]
         target_label = X.jdata[:, 4:-1]
+
+        class_loss = F.cross_entropy(pred_label, target_label, self.class_weight)
+
 
         return mse_loss, class_loss, pred_label, target_label
