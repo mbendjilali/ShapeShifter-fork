@@ -160,6 +160,12 @@ def _encode_points(
     device = cfg["device"]
     voxel_size = cfg["voxel_size_initial"]
 
+    keep = sem != 2
+
+    xyz = xyz[keep]
+    sem = sem[keep]
+    intensity = intensity[keep]
+
     grid, mean_xyz, mean_int, cc = aggregate_voxels(cfg, xyz, sem, intensity)
 
     mean_xyz_t = torch.tensor(mean_xyz, dtype=torch.float32, device=device)
@@ -391,7 +397,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Encode DALES LAZ tiles as 50×50m crops")
-    parser.add_argument("--config", default="/home/moussabendjilali/libs/ShapeShifter/configs/encoding/dales.yaml", help="Encoding configuration file path")
+    parser.add_argument("--config", default="/home/moussabendjilali/libs/ShapeShifter/configs/encoding/dales.json", help="Encoding configuration file path")
     parser.add_argument("--tile",  default=None, type=str, help="Tile ID (e.g. 5080_54435)")
     parser.add_argument("--all",   action="store_true",    help="Encode all tiles in --split")
     parser.add_argument("--split", default="train", choices=["train", "test"])
