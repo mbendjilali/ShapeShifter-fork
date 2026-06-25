@@ -81,7 +81,7 @@ def load_dales_diffusion(level, src):
     # Checkpoints were pickled under old top-level names; remap so unpickling works.
     sys.modules.setdefault('fvdb_diffusion', _fvdb_diffusion)
     sys.modules.setdefault('model', _model)
-    models = glob.glob('{}/dales_{}*.pt'.format(src, level))
+    models = glob.glob('{}/dales_{}*_best.pt'.format(src, level))
     if not models:
         raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
     models.sort(reverse=True)
@@ -129,7 +129,7 @@ def compute_all_generations_dales(
     extent_m=100.0,
     max_level=4,
     eval_batch_size=5,
-    features=13,
+    features=12,
     ddim_steps=None,
     verbose=False,
     nz=8,

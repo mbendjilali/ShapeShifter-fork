@@ -52,9 +52,11 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
             loss.backward()
             optimizer.step()
             epoch_loss_sum += loss.item()
+
         loss_val = epoch_loss_sum / steps_per_epoch
         LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
         L.append(LOSS_EMA)
+
 
     plt.plot(L, label='dales_{}'.format(args.level))
     plt.legend()

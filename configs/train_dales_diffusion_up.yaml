@@ -1,7 +1,7 @@
 # DALES — niveaux 1–4 (upsampling)
 dataset: dales
 manifest_path: configs/dales_manifest.yaml
-src_path: data/dales
+src_path: data_no_veg
 
 
 upsample_fac: 2
@@ -13,8 +13,8 @@ one_layers: 4
 features: 128
 epochs: 300
 
-n_classes: 8
-class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
+n_classes: 7
+class_weight: [0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
 
 
 
