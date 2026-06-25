@@ -1,22 +1,39 @@
+import os
+import sys
+
+# ── Per-process CUDA isolation ────────────────────────────────────────────────
+# Must run before ANY import that calls torch.cuda (model.py does so at module
+# level via get_device_capability). Without this, every rank initialises its
+# CUDA context on cuda:0; rank 1 then conflicts with rank 0 during fVDB GPU
+# operations.  Restricting each process to a single visible GPU makes "cuda"
+# unambiguous and prevents cross-process memory corruption (CUDA error 700).
+_local_rank = int(os.environ.get("LOCAL_RANK", 0))
+_world_size = int(os.environ.get("WORLD_SIZE", 1))
+if _world_size > 1:
+    _vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if _vis:
+        os.environ["CUDA_VISIBLE_DEVICES"] = _vis.split(",")[_local_rank].strip()
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(_local_rank)
+# ─────────────────────────────────────────────────────────────────────────────
+
 if True:
-    import sys
     sys.path.append('./src/utils')
 from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
 from model import DiffusionCNN, count_parameters
 from datetime import datetime
-from pathlib import Path
-import fvdb.nn as fvnn
 import argparse
+import contextlib
+import fvdb.nn as fvnn
 import math
-from tqdm import tqdm
 import matplotlib.pyplot as plt
-import torch.nn as nn
 import torch
-from torch.utils.tensorboard import SummaryWriter
+import torch.distributed as dist
 import yaml
-import os
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm, trange
 
 
 # ---------------------------------------------------------------------------
@@ -120,29 +137,50 @@ class _PrefetchLoader:
 # DALES dataset training
 # ---------------------------------------------------------------------------
 
-def _train_dales(args, cfg, device='cuda'):
+def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     """
-    Multi-tile DALES training loop.
+    Multi-tile DALES training loop with DDP, AMP, and gradient accumulation.
 
-    Checkpoints: checkpoints/diffusion_models/dales_{level}_{time}.pt
+    Launch with torchrun for multi-GPU:
+        CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \\
+            src/train/train_diffusion.py -level 0 -config configs/train_dales_diffusion_0.yaml
+
+    Checkpoints: checkpoints/diffusion_models/dales_{level}_{time}.pt  (rank 0 only)
     """
     import sys
     sys.path.insert(0, './src')
     from dataset.dales_dataset import DALESDataset, clip_data_per_element
 
+    is_main = (rank == 0)
     manifest = cfg.get("manifest_path", "data/dales_manifest.yaml")
+    clip_size = cfg.get("clip_size") if args.level == 0 else None
+
+    # ── Accumulation / effective batch ──────────────────────────────────────
+    micro_batch     = cfg["batch_size"]               # per-GPU micro-batch (8)
+    accumulate_steps = cfg.get("accumulate_steps", 1) # grad-accum steps   (2)
+    effective_batch  = micro_batch * accumulate_steps  # effective per-GPU  (16)
+
+    # Stagger fVDB GPU precompute between ranks: rank 0 goes first, rank 1 waits.
+    # Both ranks running to_custom_dense() simultaneously trips fVDB's CUDA buffer
+    # copy even on separate GPUs (TorchDeviceBuffer::copy, device→host path).
+    if world_size > 1 and rank != 0:
+        dist.barrier()
 
     dataset = DALESDataset(manifest,
                            split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"],
-                           level=args.level)
+                           level=args.level,
+                           clip_size=clip_size)
 
     val_dataset = DALESDataset.test_set(manifest,
                                         upsample_fac=cfg["upsample_fac"],
                                         base_resolution=cfg["base_resolution"],
-                                        level=args.level)
+                                        level=args.level,
+                                        clip_size=clip_size)
 
+    if world_size > 1 and rank == 0:
+        dist.barrier()
 
     # Determine channel count from first available crop
     first_crop = dataset.crops[0]
@@ -162,109 +200,176 @@ def _train_dales(args, cfg, device='cuda'):
         in_channels=n_channels,
         out_channels=n_channels,
     ).to(device)
-    count_parameters(model)
+    if is_main:
+        count_parameters(model)
 
     model_upsampler = None
     if args.level > 0:
         up_ckpt = 'checkpoints/upsamplers/dales_{}.pt'.format(args.level)
-        model_upsampler = torch.load(up_ckpt, weights_only=False)
+        model_upsampler = torch.load(up_ckpt, weights_only=False).to(device)
         model_upsampler.eval()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+
+    # ── AMP scaler ───────────────────────────────────────────────────────────
+    scaler = torch.amp.GradScaler('cuda')
+
     diffusion = SparseDiffusion(
         model,
         timesteps=cfg["diffusion_timesteps"],
         max_T=cfg.get("max_T", None) if args.level > 0 else None,
-        n_classes = cfg["n_classes"],
+        n_classes=cfg["n_classes"],
         model_upsampler=model_upsampler,
-        weight=torch.tensor(cfg["class_weight"], device='cuda'),
-    ).cuda()
+        weight=torch.tensor(cfg["class_weight"], device=device) if "class_weight" in cfg else None,
+    ).to(device)
+
+    # ── DDP wrapper ──────────────────────────────────────────────────────────
+    # Barrier before DDP init: rank 0 waits here until rank 1 has finished its
+    # preloading.  DDP triggers NCCL which sets up CUDA IPC handles across both
+    # GPUs; if rank 1 is still running fVDB kernels on cuda:1 at that point the
+    # IPC setup races with fVDB and produces CUDA error 700.
+    if world_size > 1:
+        dist.barrier()
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        diffusion_ddp = DDP(diffusion, device_ids=[0], find_unused_parameters=True)
+    else:
+        diffusion_ddp = diffusion
 
     n_epochs = cfg["epochs"]
-    batch_size = cfg["batch_size"]
-    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    grad_steps_per_epoch = math.ceil(len(dataset) / effective_batch)
     save_every = cfg["save_every"]
     val_every  = cfg.get("val_every", save_every)
 
-    print(f"  {len(dataset)} crops — {steps_per_epoch} steps/epoch — "
-          f"{n_epochs} epochs ({n_epochs * steps_per_epoch} total steps)")
+    if is_main:
+        print(f"  {len(dataset)} crops — micro_batch={micro_batch} "
+              f"× accum={accumulate_steps} × world={world_size} "
+              f"= {effective_batch * world_size} global effective batch")
+        print(f"  {grad_steps_per_epoch} grad-steps/epoch — "
+              f"{n_epochs} epochs ({n_epochs * grad_steps_per_epoch} total)")
 
     MSE_L, BCE_L, VAL_MSE_L, VAL_BCE_L = [], [], [], []
     MSE_LOSS_EMA = None
     BCE_LOSS_EMA = None
+    best_val_loss = float('inf')
+    best_epoch = -1
     current_time = datetime.today().strftime('%d-%m-%H:%M')
 
-    writer = SummaryWriter(log_dir=f"runs/diffusion_level_{args.level}_{current_time}")
+    writer = SummaryWriter(
+        log_dir=f"runs/diffusion_level_{args.level}_{current_time}"
+    ) if is_main else None
 
     loader = _PrefetchLoader(
-        dataset, "train", args.level, batch_size, device, capacity=2
+        dataset, "train", args.level, micro_batch, device, capacity=2
     ).start()
 
     try:
-        from tqdm import trange
-
-        for epoch in trange(n_epochs, desc="Epochs"):
+        for epoch in trange(n_epochs, desc="Epochs", disable=not is_main):
             epoch_mse_loss_sum = 0.0
             epoch_bce_loss_sum = 0.0
 
-            for _ in range(steps_per_epoch):
+            for _ in range(grad_steps_per_epoch):
                 optimizer.zero_grad()
-                batch = loader.next()
 
-                if args.level == 0:
-                    X0   = batch
-                    mse_loss, bce_loss = diffusion(X0)
-                else:
-                    X, X_UP, X0 = batch
-                    with torch.no_grad():
-                        X0_BLUR = model_upsampler(X, X_UP).detach()
-                    X0_BLUR.grid = X0.grid
-                    x0c, bc = clip_data_per_element(X0, X0_BLUR, cfg["clip_size"])
-                    mse_loss, bce_loss = diffusion(x0c, bc)
+                # ── Gradient accumulation loop ────────────────────────────
+                step_mse = 0.0
+                step_bce = 0.0
+                for accum_step in range(accumulate_steps):
+                    batch = loader.next()
 
-                loss = mse_loss + bce_loss
-                torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.)
-                loss.backward()
-                optimizer.step()
-                epoch_mse_loss_sum += mse_loss.item()
-                epoch_bce_loss_sum += bce_loss.item()
+                    # Defer DDP allreduce on all but the last accum step
+                    is_last_accum = (accum_step == accumulate_steps - 1)
+                    sync_ctx = (
+                        contextlib.nullcontext()
+                        if (world_size == 1 or is_last_accum)
+                        else diffusion_ddp.no_sync()
+                    )
 
-            epoch_mse_loss = epoch_mse_loss_sum / steps_per_epoch
-            epoch_bce_loss = epoch_bce_loss_sum / steps_per_epoch
+                    with sync_ctx:
+                        with torch.amp.autocast('cuda'):
+                            if args.level == 0:
+                                X0 = batch
+                                mse_loss, bce_loss, _, _ = diffusion_ddp(X0)
+                            else:
+                                X, X_UP, X0 = batch
+                                with torch.no_grad():
+                                    X0_BLUR = model_upsampler(X, X_UP).detach()
+                                X0_BLUR.grid = X0.grid
+                                x0c, bc = clip_data_per_element(
+                                    X0, X0_BLUR, cfg["clip_size"])
+                                mse_loss, bce_loss, _, _ = diffusion_ddp(x0c, bc)
+
+                            loss = (mse_loss + bce_loss) / accumulate_steps
+
+                        scaler.scale(loss).backward()
+
+                    step_mse += mse_loss.item()
+                    step_bce += bce_loss.item()
+
+                # ── Optimizer step (fixed: clip AFTER backward) ───────────
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(diffusion.parameters(), 1.)
+                scaler.step(optimizer)
+                scaler.update()
+
+                epoch_mse_loss_sum += step_mse / accumulate_steps
+                epoch_bce_loss_sum += step_bce / accumulate_steps
+
+            epoch_mse_loss = epoch_mse_loss_sum / grad_steps_per_epoch
+            epoch_bce_loss = epoch_bce_loss_sum / grad_steps_per_epoch
 
             MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
-            writer.add_scalar('Loss/train_MSE', MSE_LOSS_EMA, epoch)
-            writer.add_scalar('Loss/train_BCE', BCE_LOSS_EMA, epoch)
-            writer.add_scalar('Loss/train_total', MSE_LOSS_EMA + BCE_LOSS_EMA, epoch)
+
+            if is_main:
+                writer.add_scalars(
+                    "Loss/train",
+                    {"MSE": epoch_mse_loss,
+                     "BCE": epoch_bce_loss,
+                     "Total": epoch_mse_loss + epoch_bce_loss,
+                    }, epoch)
 
             val_suffix = ""
-            if val_dataset is not None and epoch % val_every == 0:
+            if is_main and val_dataset is not None and epoch % val_every == 0:
                 val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
                     diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                     clip_size=cfg["clip_size"], device=device,
                 )
-                if val_mse_loss is not None:
+                val_total_loss = val_mse_loss.item() + val_bce_loss.item()
+                if val_mse_loss is not None and val_bce_loss is not None:
                     VAL_MSE_L.append((epoch, val_mse_loss.item()))
-                    val_suffix += f", val_mse_loss={val_mse_loss:.4f}"
-                    writer.add_scalar('Loss/val_MSE', val_mse_loss.item(), epoch)
-                if val_bce_loss is not None:
+                    val_suffix += f", Val MSE={val_mse_loss:.4f}"
                     VAL_BCE_L.append((epoch, val_bce_loss.item()))
-                    val_suffix += f" + val_bce_loss={val_bce_loss:.4f}"
-                    writer.add_scalar('Loss/val_BCE', val_bce_loss.item(), epoch)
-                    writer.add_scalar('Loss/val_total', val_mse_loss.item() + val_bce_loss.item(), epoch)
+                    val_suffix += f" + Val BCE={val_bce_loss:.4f}"
+                    writer.add_scalars(
+                        'Loss/Val',
+                        {"Val_MSE": val_mse_loss.item(),
+                         "Val_BCE": val_bce_loss.item(),
+                         "Val_Total": val_total_loss,
+                        }, epoch
+                    )
 
-            # Update tqdm with current losses
-            tqdm.write(f"Epoch {epoch}: train_mse_ema={MSE_LOSS_EMA:.4f} + train_bce_ema={BCE_LOSS_EMA:.4f}" + val_suffix)
+                    if val_total_loss < best_val_loss:
+                        best_val_loss = val_total_loss
+                        best_epoch = epoch
+                        best_ckpt = f"checkpoints/diffusion_models/dales_{args.level}_{current_time}_best.pt"
+                        torch.save(diffusion, best_ckpt)
+                        tqdm.write(
+                            f"New best model saved at epoch {epoch}: {best_ckpt} — "
+                            f"Val loss: {best_val_loss:.4f} "
+                            f"(MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")
+                        writer.add_scalar("Best Val Loss", best_val_loss, epoch)
 
-            if epoch % save_every == 0 or epoch == n_epochs - 1:
+            if is_main:
+                tqdm.write(
+                    f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | BCE={epoch_bce_loss:.4f}"
+                    + val_suffix)
+
+            if is_main and (epoch % save_every == 0 or epoch == n_epochs - 1):
                 plt.clf()
-                # train losses
                 plt.plot(MSE_L, label='train_mse_ema')
                 plt.plot(BCE_L, label='train_bce_ema')
-                # val losses
                 if VAL_MSE_L and VAL_BCE_L:
                     plt.plot([v[0] for v in VAL_MSE_L], [v[1] for v in VAL_MSE_L],
                              label='Val_MSE', linestyle='--')
@@ -277,12 +382,14 @@ def _train_dales(args, cfg, device='cuda'):
     finally:
         loader.stop()
 
-        ckpt = 'checkpoints/diffusion_models/dales_{}_{}.pt'.format(args.level, current_time)
-        torch.save(diffusion, ckpt)
-
-        writer.close()
-
-        print(ckpt)
+        if is_main:
+            ckpt = 'checkpoints/diffusion_models/dales_{}_{}.pt'.format(
+                args.level, current_time)
+            torch.save(diffusion, ckpt)
+            writer.close()
+            print(ckpt)
+            print(f"Best epoch: {best_epoch}")
+            print(f"Best validation loss: {best_val_loss:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +397,18 @@ def _train_dales(args, cfg, device='cuda'):
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
+    # ── DDP setup (torchrun sets LOCAL_RANK / RANK / WORLD_SIZE) ─────────────
+    # CUDA_VISIBLE_DEVICES was already restricted to a single GPU per process
+    # at the top of this file (before any CUDA-touching import), so every rank
+    # sees exactly one GPU as cuda:0.
+    local_rank  = _local_rank
+    rank        = int(os.environ.get("RANK",       0))
+    world_size  = _world_size
+
+    if world_size > 1:
+        torch.cuda.set_device(0)           # single visible GPU is always cuda:0
+        dist.init_process_group(backend="nccl")
+
     device = 'cuda'
 
     parser = argparse.ArgumentParser(description='Diffusion training')
@@ -312,8 +431,11 @@ if __name__ == '__main__':
     with open(args.config, 'r') as f:
         cfg = yaml.load(f, Loader=yaml.Loader)
 
-    # Determine mode: DALES multi-tile or legacy single-shape
     dataset_name = args.dataset or cfg.get("dataset", None)
 
     if dataset_name == "dales":
-        _train_dales(args, cfg, device)
+        try:
+            _train_dales(args, cfg, device, rank=rank, world_size=world_size)
+        finally:
+            if world_size > 1:
+                dist.destroy_process_group()

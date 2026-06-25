@@ -159,6 +159,7 @@ data
 checkpoints
 output
 meshed_output
+runs
 
 *.pt
 *.pth

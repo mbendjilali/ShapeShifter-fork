@@ -16,7 +16,6 @@ import yaml
 import random
 from pathlib import Path
 from typing import List, Optional, Tuple
-import numpy as np
 
 import torch
 import fvdb
@@ -58,9 +57,11 @@ class DALESDataset:
         common_sampling_ratio: Optional[float] = None,
         preload: bool = True,
         level: Optional[int] = None,
+        clip_size: Optional[int] = None,
     ):
         self.upsample_fac = upsample_fac
         self.base_resolution = base_resolution
+        self.clip_size = clip_size
 
         with open(manifest_path) as f:
             manifest = yaml.safe_load(f)
@@ -167,9 +168,24 @@ class DALESDataset:
         return DiffusionTensor(obj.grid.to(device), obj.data.to(device))
 
     def load_crop_level0(self, split: str, crop_id: str, device: str = "cuda") -> DiffusionTensor:
-        """Level 0: coarsest-resolution DiffusionTensor → dense."""
+        """Level 0: coarsest-resolution DiffusionTensor → [clip] → dense.
+
+        When clip_size is set, a random sub-patch is clipped from the *sparse*
+        tensor before densification.  This is essential at large base resolutions
+        where the bounding box of a single crop would otherwise produce hundreds
+        of thousands of dense voxels and cause OOM.
+        """
         res = self.base_resolution
         X0 = self._load_dt(self.gt_root / split / crop_id / f"{res}.pt", device)
+        if self.clip_size is not None:
+            ijk = X0.grid.ijk.jdata
+            if len(ijk) > 0:
+                ind = torch.randint(0, len(ijk), (1,), device=ijk.device)
+                center = ijk[ind]          # (1, 3)
+                lo = center - self.clip_size
+                hi = center + self.clip_size
+                cf, cg = X0.grid.clip(X0.data, lo, hi)
+                X0 = DiffusionTensor(cg, cg.jagged_like(cf.jdata))
         return X0.to_custom_dense()
 
     def load_crop_levelN(
@@ -264,6 +280,8 @@ class DALESDataset:
         sample_ids = random.sample(self.crops, min(n_crops, len(self.crops)))
         mse_losses = []
         bce_losses = []
+        all_preds_labels = []
+        all_targets_labels = []
         for crop_id in sample_ids:
             if level == 0:
                 if crop_id in self._dense_cache:
@@ -272,16 +290,21 @@ class DALESDataset:
                 else:
                     X0 = self.load_crop_level0(split, crop_id, device)
                 with torch.no_grad():
-                    mse_loss, bce_loss = diffusion(X0)
+                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(X0)
             else:
                 X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
                 with torch.no_grad():
                     X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
                     X0_BLUR.grid = X0.grid
                     x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
-                    mse_loss, bce_loss = diffusion(x0c, blurc)
+                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(x0c, blurc)
             mse_losses.append(mse_loss)
             bce_losses.append(bce_loss)
+            all_preds_labels.append(pred_labels)
+            all_targets_labels.append(target_labels)
+        all_preds_labels = torch.cat(all_preds_labels, dim=0)
+        all_targets_labels = torch.cat(all_targets_labels, dim=0)
+
         return sum(mse_losses) / len(mse_losses), sum(bce_losses) / len(bce_losses)
 
     # ------------------------------------------------------------------
