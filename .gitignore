@@ -160,6 +160,7 @@ checkpoints
 output
 meshed_output
 runs
+data_no_veg
 
 *.pt
 *.pth
