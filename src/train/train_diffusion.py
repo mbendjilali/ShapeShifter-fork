@@ -23,6 +23,7 @@ from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
 from model import DiffusionCNN, count_parameters
+from src.utils.noisy_crop_viz import save_training_crop_snapshot
 from datetime import datetime
 import argparse
 import contextlib
@@ -316,6 +317,14 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
             epoch_mse_loss = epoch_mse_loss_sum / grad_steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / grad_steps_per_epoch
+
+            if is_main: 
+                save_training_crop_snapshot(
+                    diffusion, x0c, bc,
+                    out_dir= cfg.get("noisy_viz_dir", "output/noisy_crops"),
+                    tag = f"epoch_{epoch:04d}",
+                    n_classes = cfg["n_classes"]
+                )
 
             MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss

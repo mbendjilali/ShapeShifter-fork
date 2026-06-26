@@ -242,9 +242,14 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
     def forward(self, X: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None):
 
         # random times
-        times = torch.zeros((X.grid_count,), device=self.device).float().uniform_(
-            0., self.max_T/self.timesteps)
+        u = torch.rand((X.grid_count,), device=self.device)
+        times = torch.sqrt(u)
+        times = times * (self.max_T/self.timesteps)
         times = times[X.data.jidx.long()]
+
+        # times = torch.zeros((X.grid_count,), device=self.device).float().uniform_(
+        #     0., self.max_T/self.timesteps)
+        # times = times[X.data.jidx.long()]
 
         noisy_latents, target_X = self.q_sample(X, times, X_Blur)
 

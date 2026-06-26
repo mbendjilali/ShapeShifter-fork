@@ -19,13 +19,13 @@ class_weight: [0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
 
 
 lr: 0.0001
-batch_size: 8
+batch_size: 4
 clip_size: 20
 
 dropout: 0.05
 time_emb: 6
 diffusion_timesteps: 1000
-max_T: 500
+max_T: 1000
 save_every: 10
 val_every: 2
 val_crops: 32
