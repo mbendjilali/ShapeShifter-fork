@@ -253,6 +253,15 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
 
         noisy_latents, target_X = self.q_sample(X, times, X_Blur)
 
+        # debug 
+
+        self.debug = {
+            "clean": X,
+            "blur": X_Blur,
+            "noisy": noisy_latents,
+            "times": times.detach().cpu(),
+            }
+
         # prediction
         pred: fvnn.VDBTensor = self.model(noisy_latents, times)
 
