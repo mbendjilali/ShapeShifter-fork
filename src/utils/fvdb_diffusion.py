@@ -46,11 +46,26 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         n_classes=None,
         model_upsampler=None,
         weight=None,
+        loss_weighting=None,
+        min_snr_gamma=5.0,
+        p2_k=1.0,
+        p2_gamma=1.0,
     ):
         super().__init__()
         self.model = model
         self.model_upsampler = model_upsampler
         self.channels = 1
+
+        #   'min_snr' → Min-SNR-γ (Hang et al. 2023): min(SNR, γ); rebalances to mid-σ.
+        #   'p2'      → P2-true on an x0 head (Choi et al. 2022): SNR·(k+SNR)^(−γ);
+        #               keeps the high-σ lean while taming the SNR→0 tail.
+
+        assert loss_weighting in (None, 'min_snr', 'p2'), \
+            f"invalid loss_weighting {loss_weighting!r}"
+        self.loss_weighting = loss_weighting
+        self.min_snr_gamma = min_snr_gamma
+        self.p2_k = p2_k
+        self.p2_gamma = p2_gamma
 
         if noise_schedule == "linear":
             self.log_snr = beta_linear_log_snr
@@ -263,10 +278,24 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # mask_weights = torch.where(is_occupied, w_occ, w_emp)
         # mask_loss = (((pred.jdata[:, -1] - mask) ** 2)).mean()
 
-        # --- Geometry MSE (offset + intensity) — occupied voxels only, class-weighted ---
+        # --- Geometry MSE (offset + intensity) — optionally Min-SNR-γ weighted ---
         geom_pred   = torch.cat([pred.jdata[:, :4], pred.jdata[:, -1][:, None]], dim=1)
         geom_target = torch.cat([X.jdata[:, :4], X.jdata[:, -1][:, None]], dim=1)
-        mse_loss = F.mse_loss(geom_pred, geom_target)
+        if self.loss_weighting is not None:
+            # SNR = exp(log_snr); times/log_snr are per-voxel.  The model predicts
+            # x_start (x0-parameterization), so weights are expressed as multipliers
+            # on the x0-MSE.  Normalize by the batch-mean weight so the loss scale
+            # (and the existing grad-clip / LR) are preserved.
+            snr = torch.exp(self.log_snr(times))
+            if self.loss_weighting == 'min_snr':
+                w = snr.clamp(max=self.min_snr_gamma)
+            else:  # 'p2' — P2-true on an x0 head: SNR·(k+SNR)^(−γ)
+                w = snr * (self.p2_k + snr).pow(-self.p2_gamma)
+            w = w / w.mean().clamp(min=1e-8)
+            per_voxel_se = ((geom_pred - geom_target) ** 2).mean(dim=1)
+            mse_loss = (w * per_voxel_se).mean()
+        else:
+            mse_loss = F.mse_loss(geom_pred, geom_target)
         # if is_occupied.any():
         #     gp = geom_pred[is_occupied]
         #     gt = geom_target[is_occupied]

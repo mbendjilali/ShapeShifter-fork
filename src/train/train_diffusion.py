@@ -37,6 +37,52 @@ from tqdm import tqdm, trange
 
 
 # ---------------------------------------------------------------------------
+# Weight EMA (Karras et al. 2022)
+# ---------------------------------------------------------------------------
+
+class WeightEMA:
+    """
+    Exponential moving average of model parameters.
+
+    Sampling from the raw last-iterate is noisy; EMA weights give markedly
+    better samples.  `store`/`copy_to`/`restore` let us run validation and
+    write checkpoints from the EMA weights, then restore the live weights for
+    continued training.
+    """
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {n: p.detach().clone()
+                       for n, p in model.named_parameters() if p.requires_grad}
+        self._backup = None
+
+    @torch.no_grad()
+    def update(self, model):
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1 - self.decay)
+
+    @torch.no_grad()
+    def store(self, model):
+        self._backup = {n: p.detach().clone()
+                        for n, p in model.named_parameters() if p.requires_grad}
+
+    @torch.no_grad()
+    def copy_to(self, model):
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                p.copy_(self.shadow[n])
+
+    @torch.no_grad()
+    def restore(self, model):
+        if self._backup is None:
+            return
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                p.copy_(self._backup[n])
+        self._backup = None
+
+
+# ---------------------------------------------------------------------------
 # Original single-shape helpers (kept for backwards compat)
 # ---------------------------------------------------------------------------
 
@@ -156,13 +202,10 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     clip_size = cfg.get("clip_size") if args.level == 0 else None
 
     # ── Accumulation / effective batch ──────────────────────────────────────
-    micro_batch     = cfg["batch_size"]               # per-GPU micro-batch (8)
-    accumulate_steps = cfg.get("accumulate_steps", 1) # grad-accum steps   (2)
-    effective_batch  = micro_batch * accumulate_steps  # effective per-GPU  (16)
+    micro_batch     = cfg["batch_size"]               # per-GPU 
+    accumulate_steps = cfg.get("accumulate_steps", 1)
+    effective_batch  = micro_batch * accumulate_steps  # per-GPU
 
-    # Stagger fVDB GPU precompute between ranks: rank 0 goes first, rank 1 waits.
-    # Both ranks running to_custom_dense() simultaneously trips fVDB's CUDA buffer
-    # copy even on separate GPUs (TorchDeviceBuffer::copy, device→host path).
     if world_size > 1 and rank != 0:
         dist.barrier()
 
@@ -234,19 +277,21 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         n_classes=cfg["n_classes"],
         model_upsampler=model_upsampler,
         weight=torch.tensor(cfg["class_weight"], device=device) if "class_weight" in cfg else None,
+        loss_weighting=cfg.get("loss_weighting", None),
+        min_snr_gamma=cfg.get("min_snr_gamma", 5.0),
+        p2_k=cfg.get("p2_k", 1.0),
+        p2_gamma=cfg.get("p2_gamma", 1.0),
     ).to(device)
 
-    # ── DDP wrapper ──────────────────────────────────────────────────────────
-    # Barrier before DDP init: rank 0 waits here until rank 1 has finished its
-    # preloading.  DDP triggers NCCL which sets up CUDA IPC handles across both
-    # GPUs; if rank 1 is still running fVDB kernels on cuda:1 at that point the
-    # IPC setup races with fVDB and produces CUDA error 700.
     if world_size > 1:
         dist.barrier()
         from torch.nn.parallel import DistributedDataParallel as DDP
         diffusion_ddp = DDP(diffusion, device_ids=[0], find_unused_parameters=True)
     else:
         diffusion_ddp = diffusion
+
+    # Weight EMA maintained on the main process only.
+    ema = WeightEMA(diffusion, decay=cfg.get("ema_decay", 0.999)) if is_main else None
 
     n_epochs = cfg["epochs"]
     grad_steps_per_epoch = math.ceil(len(dataset) / effective_batch)
@@ -325,14 +370,13 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                         step_mse += mse_val
                         step_bce += bce_val
 
-                # ── Optimizer step (fixed: clip AFTER backward) ───────────
-                # Skip entirely if every accumulation step had a bad loss —
-                # calling scaler.unscale_ / scaler.step without a prior
-                # scaler.scale(...).backward() raises an AssertionError.
+
                 if any_backward:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(diffusion.parameters(), 1.)
                     scaler.step(optimizer)
+                    if ema is not None:
+                        ema.update(diffusion)
                 scaler.update()
 
                 epoch_mse_loss_sum += step_mse / accumulate_steps
@@ -358,34 +402,43 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
             val_suffix = ""
             if is_main and val_dataset is not None and epoch % val_every == 0:
-                val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
-                    diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
-                    clip_size=cfg["clip_size"], device=device,
-                )
-                val_total_loss = val_mse_loss.item() + val_bce_loss.item()
-                if val_mse_loss is not None and val_bce_loss is not None:
-                    VAL_MSE_L.append((epoch, val_mse_loss.item()))
-                    val_suffix += f", Val MSE={val_mse_loss:.4f}"
-                    VAL_BCE_L.append((epoch, val_bce_loss.item()))
-                    val_suffix += f" + Val BCE={val_bce_loss:.4f}"
-                    writer.add_scalars(
-                        'Loss/Val',
-                        {"Val_MSE": val_mse_loss.item(),
-                         "Val_BCE": val_bce_loss.item(),
-                         "Val_Total": val_total_loss,
-                        }, epoch
+                # Validate and checkpoint from the EMA weights, then restore the
+                # live weights for continued training.
+                if ema is not None:
+                    ema.store(diffusion)
+                    ema.copy_to(diffusion)
+                try:
+                    val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
+                        diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
+                        clip_size=cfg["clip_size"], device=device,
                     )
+                    val_total_loss = val_mse_loss.item() + val_bce_loss.item()
+                    if val_mse_loss is not None and val_bce_loss is not None:
+                        VAL_MSE_L.append((epoch, val_mse_loss.item()))
+                        val_suffix += f", Val MSE={val_mse_loss:.4f}"
+                        VAL_BCE_L.append((epoch, val_bce_loss.item()))
+                        val_suffix += f" + Val BCE={val_bce_loss:.4f}"
+                        writer.add_scalars(
+                            'Loss/Val',
+                            {"Val_MSE": val_mse_loss.item(),
+                             "Val_BCE": val_bce_loss.item(),
+                             "Val_Total": val_total_loss,
+                            }, epoch
+                        )
 
-                    if val_total_loss < best_val_loss:
-                        best_val_loss = val_total_loss
-                        best_epoch = epoch
-                        best_ckpt = f"checkpoints/diffusion_models/dales_{args.level}_{current_time}_best.pt"
-                        torch.save(diffusion, best_ckpt)
-                        tqdm.write(
-                            f"New best model saved at epoch {epoch}: {best_ckpt} — "
-                            f"Val loss: {best_val_loss:.4f} "
-                            f"(MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")
-                        writer.add_scalar("Best Val Loss", best_val_loss, epoch)
+                        if val_total_loss < best_val_loss:
+                            best_val_loss = val_total_loss
+                            best_epoch = epoch
+                            best_ckpt = f"checkpoints/diffusion_models/dales_{args.level}_{current_time}_best.pt"
+                            torch.save(diffusion, best_ckpt)
+                            tqdm.write(
+                                f"New best model saved at epoch {epoch}: {best_ckpt} — "
+                                f"Val loss: {best_val_loss:.4f} "
+                                f"(MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")
+                            writer.add_scalar("Best Val Loss", best_val_loss, epoch)
+                finally:
+                    if ema is not None:
+                        ema.restore(diffusion)
 
             if is_main:
                 tqdm.write(
@@ -411,6 +464,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         if is_main:
             ckpt = 'checkpoints/diffusion_models/dales_{}_{}.pt'.format(
                 args.level, current_time)
+            # Save the EMA weights as the final checkpoint (better sample quality).
+            if ema is not None:
+                ema.copy_to(diffusion)
             torch.save(diffusion, ckpt)
             writer.close()
             print(ckpt)
@@ -418,21 +474,14 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             print(f"Best validation loss: {best_val_loss:.4f}")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 if __name__ == '__main__':
     # ── DDP setup (torchrun sets LOCAL_RANK / RANK / WORLD_SIZE) ─────────────
-    # CUDA_VISIBLE_DEVICES was already restricted to a single GPU per process
-    # at the top of this file (before any CUDA-touching import), so every rank
-    # sees exactly one GPU as cuda:0.
     local_rank  = _local_rank
     rank        = int(os.environ.get("RANK",       0))
     world_size  = _world_size
 
     if world_size > 1:
-        torch.cuda.set_device(0)           # single visible GPU is always cuda:0
+        torch.cuda.set_device(0)
         dist.init_process_group(backend="nccl")
 
     device = 'cuda'

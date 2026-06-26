@@ -23,7 +23,17 @@ accumulate_steps: 2    # gradient accumulation steps; effective per-GPU batch = 
 clip_size: 20
 
 dropout: 0.05
-time_emb: 6
+time_emb: 128          # Gaussian-Fourier time-embedding dim (FiLM conditioning)
+ema_decay: 0.999       # weight-EMA decay used for validation + saved checkpoints
+
+# Noise-level loss weighting on the geometry MSE (advice.md item 7).
+#   loss_weighting: p2       → P2-true on the x0 head: SNR·(p2_k+SNR)^(−p2_gamma)
+#   loss_weighting: min_snr  → Min-SNR-γ: min(SNR, min_snr_gamma)  [for A/B]
+#   loss_weighting: ~        → unweighted x0-MSE
+loss_weighting: p2
+p2_k: 1.0
+p2_gamma: 1.0
+min_snr_gamma: 5.0
 diffusion_timesteps: 1000
 save_every: 10
 val_every: 2

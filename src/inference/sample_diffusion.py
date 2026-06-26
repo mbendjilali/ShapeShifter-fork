@@ -92,12 +92,12 @@ def load_dales_diffusion(level, src):
     # Best-epoch dict format: reconstruct SparseDiffusion from config + state dict.
     cfg = ckpt["config"]
     state_dict = ckpt["model_state_dict"]
-    # Infer in_channels from first conv weight shape: [C_out, in_channels+time_emb, ...]
-    first_w = next(iter(state_dict.values()))
-    in_channels = first_w.shape[1] - cfg["time_emb"]
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     unet_depth = cfg.get("unet_depth", 0)
     if unet_depth > 0:
+        # FiLM U-Net: time is conditioned, not concatenated → the stem conv's
+        # in_channels equals the data channel count (no +time_emb).
+        in_channels = state_dict["input_conv.0.weight"].shape[1]
         model = DiffusionUNet(
             channels=cfg["features"],
             unet_depth=unet_depth,
@@ -109,6 +109,10 @@ def load_dales_diffusion(level, src):
             dropout=cfg.get("dropout", 0.01),
         ).to(device)
     else:
+        # Legacy DiffusionCNN: time IS concatenated at the stem → subtract it.
+        # [C_out, in_channels + time_emb, k, k, k]
+        first_w = next(iter(state_dict.values()))
+        in_channels = first_w.shape[1] - cfg["time_emb"]
         model = DiffusionCNN(
             channels=cfg["features"],
             layers=cfg["layers"],
