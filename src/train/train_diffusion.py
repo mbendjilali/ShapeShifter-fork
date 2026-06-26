@@ -28,7 +28,6 @@ import argparse
 import contextlib
 import fvdb.nn as fvnn
 import math
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 import yaml
@@ -445,19 +444,6 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | BCE={epoch_bce_loss:.4f}"
                     + val_suffix)
 
-            if is_main and (epoch % save_every == 0 or epoch == n_epochs - 1):
-                plt.clf()
-                plt.plot(MSE_L, label='train_mse_ema')
-                plt.plot(BCE_L, label='train_bce_ema')
-                if VAL_MSE_L and VAL_BCE_L:
-                    plt.plot([v[0] for v in VAL_MSE_L], [v[1] for v in VAL_MSE_L],
-                             label='Val_MSE', linestyle='--')
-                    plt.plot([v[0] for v in VAL_BCE_L], [v[1] for v in VAL_BCE_L],
-                             label='Val_BCE', linestyle='--')
-                plt.xlabel('epoch')
-                plt.legend()
-                plt.savefig('checkpoints/diffusion_models/dales_loss_{}_{}.png'.format(
-                    args.level, current_time))
     finally:
         loader.stop()
 
