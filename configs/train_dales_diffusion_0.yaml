@@ -11,16 +11,28 @@ layers: 3
 first_ks: 3
 one_layers: 6
 features: 128
-epochs: 250
+epochs: 90
 
 n_classes: 8
 class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
 
 
 lr: 0.0001
-batch_size: 8          # per-GPU micro-batch; effective = batch_size × accumulate_steps
-accumulate_steps: 2    # gradient accumulation steps; effective per-GPU batch = 16
-clip_size: 20
+batch_size: 4          # per-GPU micro-batch; effective = batch_size × accumulate_steps
+accumulate_steps: 2    # gradient accumulation steps; effective per-GPU batch = 8
+# Level-0 training windows (advice.md item 3).
+#   random_crop: true → windows centered at a random grid location (occupancy-
+#     agnostic), re-clipped fresh each epoch, so training matches the full-tile
+#     inference distribution instead of always centering on occupancy.
+#   clip_size is the half-extent: window edge = 2*clip_size voxels.  The res-64
+#     tiles span ~125³, so clip_size≈63 ≈ the full tile.  Larger = more layout
+#     context but more memory; lower batch_size/raise accumulate_steps if OOM.
+random_crop: true
+clip_size: 32
+# Clean features of empty (mask=-1) voxels (advice.md item 3):
+#   zero → neutral (q_sample → pure noise, matches randn-start inference)
+#   blur → legacy smoothed-neighbour fill (train/inference mismatch)
+empty_fill: zero
 
 dropout: 0.05
 time_emb: 128          # Gaussian-Fourier time-embedding dim (FiLM conditioning)
@@ -34,6 +46,18 @@ loss_weighting: p2
 p2_k: 1.0
 p2_gamma: 1.0
 min_snr_gamma: 5.0
+
+# Occupancy (mask) objective (advice.md item 1 — "the crux").
+#   occupancy_objective: bce  → Bernoulli occupancy: channel -1 is a logit,
+#       BCE-with-logits + pos_weight (capped at occ_pos_weight_max) for imbalance,
+#       decoded to 2σ-1 at sampling.  occ_loss_weight scales the term in the total.
+#   occupancy_objective: mse  → legacy: mask denoised inside the Gaussian geom MSE.
+occupancy_objective: bce
+occ_pos_weight_max: 8.0       # cap on pos_weight=#empty/#occ (was 50; 50 fires on
+                             # sparse windows and pushes over-confident-occupied)
+occ_loss_weight: 1.0
+occ_label_smoothing: 0.05    # targets 0,1 → 0.05,0.95: bounds the BCE so val
+                             # occupancy can't explode from over-confidence
 diffusion_timesteps: 1000
 save_every: 10
 val_every: 2

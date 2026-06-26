@@ -208,18 +208,24 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     if world_size > 1 and rank != 0:
         dist.barrier()
 
+    random_crop = cfg.get("random_crop", False) and args.level == 0
+    empty_fill = cfg.get("empty_fill", "blur")
     dataset = DALESDataset(manifest,
                            split="train",
                            upsample_fac=cfg["upsample_fac"],
                            base_resolution=cfg["base_resolution"],
                            level=args.level,
-                           clip_size=clip_size)
+                           clip_size=clip_size,
+                           random_crop=random_crop,
+                           empty_fill=empty_fill)
 
     val_dataset = DALESDataset.test_set(manifest,
                                         upsample_fac=cfg["upsample_fac"],
                                         base_resolution=cfg["base_resolution"],
                                         level=args.level,
-                                        clip_size=clip_size)
+                                        clip_size=clip_size,
+                                        random_crop=random_crop,
+                                        empty_fill=empty_fill)
 
     if world_size > 1 and rank == 0:
         dist.barrier()
@@ -280,6 +286,10 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         min_snr_gamma=cfg.get("min_snr_gamma", 5.0),
         p2_k=cfg.get("p2_k", 1.0),
         p2_gamma=cfg.get("p2_gamma", 1.0),
+        occupancy_objective=cfg.get("occupancy_objective", "mse"),
+        occ_pos_weight_max=cfg.get("occ_pos_weight_max", 50.0),
+        occ_loss_weight=cfg.get("occ_loss_weight", 1.0),
+        occ_label_smoothing=cfg.get("occ_label_smoothing", 0.0),
     ).to(device)
 
     if world_size > 1:
@@ -304,9 +314,10 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         print(f"  {grad_steps_per_epoch} grad-steps/epoch — "
               f"{n_epochs} epochs ({n_epochs * grad_steps_per_epoch} total)")
 
-    MSE_L, BCE_L, VAL_MSE_L, VAL_BCE_L = [], [], [], []
+    MSE_L, BCE_L, OCC_L, VAL_MSE_L, VAL_BCE_L = [], [], [], [], []
     MSE_LOSS_EMA = None
     BCE_LOSS_EMA = None
+    OCC_LOSS_EMA = None
     best_val_loss = float('inf')
     best_epoch = -1
     current_time = datetime.today().strftime('%d-%m-%H:%M')
@@ -323,6 +334,8 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         for epoch in trange(n_epochs, desc="Epochs", disable=not is_main):
             epoch_mse_loss_sum = 0.0
             epoch_bce_loss_sum = 0.0
+            epoch_occ_loss_sum = 0.0
+            epoch_occ_iou_sum = 0.0
 
             for _ in range(grad_steps_per_epoch):
                 optimizer.zero_grad()
@@ -330,6 +343,8 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                 # ── Gradient accumulation loop ────────────────────────────
                 step_mse = 0.0
                 step_bce = 0.0
+                step_occ = 0.0
+                step_iou = 0.0
                 any_backward = False
                 for accum_step in range(accumulate_steps):
                     batch = loader.next()
@@ -346,7 +361,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                         with torch.amp.autocast('cuda'):
                             if args.level == 0:
                                 X0 = batch
-                                mse_loss, bce_loss, _, _ = diffusion_ddp(X0)
+                                mse_loss, bce_loss, occ_loss, _, _, occ_iou = diffusion_ddp(X0)
                             else:
                                 X, X_UP, X0 = batch
                                 with torch.no_grad():
@@ -354,9 +369,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                                 X0_BLUR.grid = X0.grid
                                 x0c, bc = clip_data_per_element(
                                     X0, X0_BLUR, cfg["clip_size"])
-                                mse_loss, bce_loss, _, _ = diffusion_ddp(x0c, bc)
+                                mse_loss, bce_loss, occ_loss, _, _, occ_iou = diffusion_ddp(x0c, bc)
 
-                            loss = (mse_loss + bce_loss) / accumulate_steps
+                            loss = (mse_loss + bce_loss + occ_loss) / accumulate_steps
 
                         if torch.isnan(loss) or torch.isinf(loss):
                             continue
@@ -365,9 +380,12 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
                     mse_val = mse_loss.item()
                     bce_val = bce_loss.item()
-                    if not (math.isnan(mse_val) or math.isnan(bce_val)):
+                    occ_val = occ_loss.item()
+                    if not (math.isnan(mse_val) or math.isnan(bce_val) or math.isnan(occ_val)):
                         step_mse += mse_val
                         step_bce += bce_val
+                        step_occ += occ_val
+                        step_iou += occ_iou.item()
 
 
                 if any_backward:
@@ -380,23 +398,31 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
                 epoch_mse_loss_sum += step_mse / accumulate_steps
                 epoch_bce_loss_sum += step_bce / accumulate_steps
+                epoch_occ_loss_sum += step_occ / accumulate_steps
+                epoch_occ_iou_sum += step_iou / accumulate_steps
 
             epoch_mse_loss = epoch_mse_loss_sum / grad_steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / grad_steps_per_epoch
+            epoch_occ_loss = epoch_occ_loss_sum / grad_steps_per_epoch
+            epoch_occ_iou  = epoch_occ_iou_sum / grad_steps_per_epoch
 
             if not math.isnan(epoch_mse_loss):
                 MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             if not math.isnan(epoch_bce_loss):
                 BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
+            if not math.isnan(epoch_occ_loss):
+                OCC_LOSS_EMA = epoch_occ_loss if OCC_LOSS_EMA is None else 0.99 * OCC_LOSS_EMA + 0.01 * epoch_occ_loss
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
+            OCC_L.append(OCC_LOSS_EMA)
 
             if is_main:
                 writer.add_scalars(
                     "Loss/train",
                     {"MSE": epoch_mse_loss,
                      "BCE": epoch_bce_loss,
-                     "Total": epoch_mse_loss + epoch_bce_loss,
+                     "OCC": epoch_occ_loss,
+                     "Total": epoch_mse_loss + epoch_bce_loss + epoch_occ_loss,
                     }, epoch)
 
             val_suffix = ""
@@ -407,22 +433,30 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     ema.store(diffusion)
                     ema.copy_to(diffusion)
                 try:
-                    val_mse_loss, val_bce_loss = val_dataset.compute_val_loss(
+                    val_mse_loss, val_bce_loss, val_occ_loss, val_occ_iou = val_dataset.compute_val_loss(
                         diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                         clip_size=cfg["clip_size"], device=device,
                     )
-                    val_total_loss = val_mse_loss.item() + val_bce_loss.item()
+                    val_total_loss = (val_mse_loss.item() + val_bce_loss.item()
+                                      + val_occ_loss.item())
                     if val_mse_loss is not None and val_bce_loss is not None:
                         VAL_MSE_L.append((epoch, val_mse_loss.item()))
                         val_suffix += f", Val MSE={val_mse_loss:.4f}"
                         VAL_BCE_L.append((epoch, val_bce_loss.item()))
                         val_suffix += f" + Val BCE={val_bce_loss:.4f}"
+                        val_suffix += f" + Val OCC={val_occ_loss:.4f}"
+                        val_suffix += f" + Val OccIoU={val_occ_iou:.3f}"
                         writer.add_scalars(
                             'Loss/Val',
                             {"Val_MSE": val_mse_loss.item(),
                              "Val_BCE": val_bce_loss.item(),
+                             "Val_OCC": val_occ_loss.item(),
                              "Val_Total": val_total_loss,
                             }, epoch
+                        )
+                        writer.add_scalars(
+                            'OccIoU',
+                            {"train": epoch_occ_iou, "val": val_occ_iou.item()}, epoch
                         )
 
                         if val_total_loss < best_val_loss:
@@ -433,7 +467,8 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                             tqdm.write(
                                 f"New best model saved at epoch {epoch}: {best_ckpt} — "
                                 f"Val loss: {best_val_loss:.4f} "
-                                f"(MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f})")
+                                f"(MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f}, "
+                                f"OCC: {val_occ_loss:.4f})")
                             writer.add_scalar("Best Val Loss", best_val_loss, epoch)
                 finally:
                     if ema is not None:
@@ -441,7 +476,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
             if is_main:
                 tqdm.write(
-                    f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | BCE={epoch_bce_loss:.4f}"
+                    f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | "
+                    f"BCE={epoch_bce_loss:.4f} | OCC={epoch_occ_loss:.4f} "
+                    f"| OccIoU={epoch_occ_iou:.3f}"
                     + val_suffix)
 
     finally:

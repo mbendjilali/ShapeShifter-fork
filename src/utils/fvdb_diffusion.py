@@ -50,6 +50,10 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         min_snr_gamma=5.0,
         p2_k=1.0,
         p2_gamma=1.0,
+        occupancy_objective='mse',
+        occ_pos_weight_max=50.0,
+        occ_loss_weight=1.0,
+        occ_label_smoothing=0.0,
     ):
         super().__init__()
         self.model = model
@@ -66,6 +70,23 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         self.min_snr_gamma = min_snr_gamma
         self.p2_k = p2_k
         self.p2_gamma = p2_gamma
+
+        # Occupancy (mask channel) objective.
+        #   'mse' → legacy: mask is a Gaussian channel inside the geometry MSE
+        #           (the MSE-optimal collapse to "-1 everywhere" under heavy
+        #            empty/occupied imbalance — the level-0 saturation symptom).
+        #   'bce' → occupancy is a proper Bernoulli: channel -1 is a *logit*,
+        #           trained with BCE-with-logits + pos_weight to handle imbalance,
+        #           and mapped to the data domain (2σ-1 = E[bit]) during sampling.
+        assert occupancy_objective in ('mse', 'bce'), \
+            f"invalid occupancy_objective {occupancy_objective!r}"
+        self.occupancy_objective = occupancy_objective
+        self.occ_pos_weight_max = occ_pos_weight_max
+        self.occ_loss_weight = occ_loss_weight
+        # Label smoothing on the occupancy target (0,1 → eps,1-eps) bounds the
+        # BCE: it caps how confident logits can grow, which stops the val BCE
+        # explosion when the model over-fits per-tile occupancy.
+        self.occ_label_smoothing = occ_label_smoothing
 
         if noise_schedule == "linear":
             self.log_snr = beta_linear_log_snr
@@ -100,10 +121,16 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         return times
 
     def _sigmoid_semantic_channels(self, x: fvnn.VDBTensor) -> None:
-        """Convert CE-trained class logits to probabilities in-place (for sampling)."""
+        """Decode the network's raw prediction into the data domain in-place
+        (for sampling): CE-trained class logits → softmax probabilities, and —
+        in 'bce' occupancy mode — the occupancy logit → its analog-bit expectation
+        2σ(logit)−1 ∈ (−1,1), so the Gaussian posterior and the threshold-at-0
+        readout (remove_mask) both stay in-distribution."""
         n_cls = getattr(self, 'n_classes', None)
         if n_cls:
             x.data.jdata[:, 4:4 + n_cls] = torch.softmax(x.data.jdata[:, 4:4 + n_cls], dim=-1)
+        if getattr(self, 'occupancy_objective', 'mse') == 'bce':
+            x.data.jdata[:, -1] = 2.0 * torch.sigmoid(x.data.jdata[:, -1]) - 1.0
 
     @torch.no_grad()
     def ddpm_sample(self, noisy_grid: fvnn.VDBTensor, X_Blur: fvnn.VDBTensor = None, clip=None):
@@ -278,9 +305,15 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # mask_weights = torch.where(is_occupied, w_occ, w_emp)
         # mask_loss = (((pred.jdata[:, -1] - mask) ** 2)).mean()
 
-        # --- Geometry MSE (offset + intensity) — optionally Min-SNR-γ weighted ---
-        geom_pred   = torch.cat([pred.jdata[:, :4], pred.jdata[:, -1][:, None]], dim=1)
-        geom_target = torch.cat([X.jdata[:, :4], X.jdata[:, -1][:, None]], dim=1)
+        # --- Geometry MSE — optionally Min-SNR-γ / P2 weighted ---
+        # In 'bce' occupancy mode the mask leaves the Gaussian MSE entirely
+        # (it becomes a Bernoulli, below); in legacy 'mse' mode it stays in.
+        if self.occupancy_objective == 'bce':
+            geom_pred   = pred.jdata[:, :4]
+            geom_target = X.jdata[:, :4]
+        else:
+            geom_pred   = torch.cat([pred.jdata[:, :4], pred.jdata[:, -1][:, None]], dim=1)
+            geom_target = torch.cat([X.jdata[:, :4], X.jdata[:, -1][:, None]], dim=1)
         if self.loss_weighting is not None:
             # SNR = exp(log_snr); times/log_snr are per-voxel.  The model predicts
             # x_start (x0-parameterization), so weights are expressed as multipliers
@@ -303,7 +336,31 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # else:
         #     geom_loss = geom_pred.sum() * 0.0
 
-        # mse_loss = geom_loss + mask_loss
+        # --- Occupancy BCE (Bernoulli structure prior) — imbalance-handled ---
+        # Channel -1 is a logit; target is hard occupancy (occupied vs empty).
+        # pos_weight = #empty / #occupied up-weights the rare occupied class so
+        # the optimum is no longer "predict empty everywhere".
+        occ_target_hard = (X.jdata[:, -1] > 0)
+        if self.occupancy_objective == 'bce':
+            occ_logit  = pred.jdata[:, -1]
+            occ_target = occ_target_hard.float()
+            n_occ   = occ_target.sum().clamp(min=1.0)
+            n_empty = (occ_target.numel() - occ_target.sum()).clamp(min=1.0)
+            pos_weight = (n_empty / n_occ).clamp(max=self.occ_pos_weight_max)
+            eps = self.occ_label_smoothing
+            soft_target = occ_target * (1.0 - 2.0 * eps) + eps if eps > 0 else occ_target
+            occ_loss = F.binary_cross_entropy_with_logits(
+                occ_logit, soft_target, pos_weight=pos_weight) * self.occ_loss_weight
+        else:
+            occ_loss = mse_loss.new_zeros(())
+
+        # --- Occupancy IoU (diagnostic): is structure actually right, or is the
+        # BCE just inflating from over-confidence?  pred occupied = logit/mask > 0.
+        with torch.no_grad():
+            pred_occ = pred.jdata[:, -1] > 0
+            inter = (pred_occ & occ_target_hard).sum().float()
+            union = (pred_occ | occ_target_hard).sum().clamp(min=1).float()
+            occ_iou = inter / union
 
         # --- Class loss — softmax CE on occupied voxels only, class-weighted ---
         class_pred = pred.jdata[:, 4:-1]    # (N, C) logits
@@ -323,4 +380,4 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         class_loss = F.cross_entropy(pred_label, target_label, self.class_weight)
 
 
-        return mse_loss, class_loss, pred_label, target_label
+        return mse_loss, class_loss, occ_loss, pred_label, target_label, occ_iou
