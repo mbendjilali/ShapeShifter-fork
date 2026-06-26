@@ -22,7 +22,7 @@ if True:
 from diffusion_tensor import DiffusionTensor
 from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
-from model import DiffusionCNN, count_parameters
+from model import DiffusionCNN, DiffusionUNet, count_parameters
 from datetime import datetime
 import argparse
 import contextlib
@@ -191,15 +191,28 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     n_channels = sample_dt.jdata.shape[-1]
     del sample_dt
 
-    model = DiffusionCNN(
-        channels=cfg["features"],
-        layers=cfg["layers"],
-        time_emb=cfg["time_emb"],
-        one_layers=cfg["one_layers"],
-        first_ks=cfg["first_ks"],
-        in_channels=n_channels,
-        out_channels=n_channels,
-    ).to(device)
+    unet_depth = cfg.get("unet_depth", 0)
+    if unet_depth > 0:
+        model = DiffusionUNet(
+            channels=cfg["features"],
+            unet_depth=unet_depth,
+            time_emb=cfg["time_emb"],
+            one_layers=cfg["one_layers"],
+            first_ks=cfg["first_ks"],
+            in_channels=n_channels,
+            out_channels=n_channels,
+            dropout=cfg.get("dropout", 0.01),
+        ).to(device)
+    else:
+        model = DiffusionCNN(
+            channels=cfg["features"],
+            layers=cfg["layers"],
+            time_emb=cfg["time_emb"],
+            one_layers=cfg["one_layers"],
+            first_ks=cfg["first_ks"],
+            in_channels=n_channels,
+            out_channels=n_channels,
+        ).to(device)
     if is_main:
         count_parameters(model)
 
@@ -273,6 +286,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                 # ── Gradient accumulation loop ────────────────────────────
                 step_mse = 0.0
                 step_bce = 0.0
+                any_backward = False
                 for accum_step in range(accumulate_steps):
                     batch = loader.next()
 
@@ -300,15 +314,25 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
                             loss = (mse_loss + bce_loss) / accumulate_steps
 
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            continue
                         scaler.scale(loss).backward()
+                        any_backward = True
 
-                    step_mse += mse_loss.item()
-                    step_bce += bce_loss.item()
+                    mse_val = mse_loss.item()
+                    bce_val = bce_loss.item()
+                    if not (math.isnan(mse_val) or math.isnan(bce_val)):
+                        step_mse += mse_val
+                        step_bce += bce_val
 
                 # ── Optimizer step (fixed: clip AFTER backward) ───────────
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(diffusion.parameters(), 1.)
-                scaler.step(optimizer)
+                # Skip entirely if every accumulation step had a bad loss —
+                # calling scaler.unscale_ / scaler.step without a prior
+                # scaler.scale(...).backward() raises an AssertionError.
+                if any_backward:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(diffusion.parameters(), 1.)
+                    scaler.step(optimizer)
                 scaler.update()
 
                 epoch_mse_loss_sum += step_mse / accumulate_steps
@@ -317,8 +341,10 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             epoch_mse_loss = epoch_mse_loss_sum / grad_steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / grad_steps_per_epoch
 
-            MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
-            BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
+            if not math.isnan(epoch_mse_loss):
+                MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
+            if not math.isnan(epoch_bce_loss):
+                BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
 

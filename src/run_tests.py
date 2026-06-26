@@ -187,7 +187,7 @@ def parse_args():
         help="Dataset split used when resolving a bare crop ID.",
     )
     a_group.add_argument(
-        "--t_list", type=float, nargs="+", default=[0.1, 0.2, 0.3, 0.5],
+        "--t_list", type=float, nargs="+", default=[2.0],
         help="Noise fractions for test_A (0.0–1.0).",
     )
 
@@ -215,7 +215,7 @@ def parse_args():
     # --- grid shape (shared) ---
     g_group = p.add_argument_group("grid options")
     g_group.add_argument(
-        "--base_res", type=int, default=16,
+        "--base_res", type=int, default=64,
         help=(
             "Coarsest grid resolution. Crop .pt file for level N is loaded at "
             "resolution base_res * 2**level."

@@ -174,3 +174,5 @@ runs
 *.zip
 *.ckpt
 *.mtl
+
+data_no_veg/
