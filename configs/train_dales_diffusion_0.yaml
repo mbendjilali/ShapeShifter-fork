@@ -38,6 +38,19 @@ dropout: 0.05
 time_emb: 128          # Gaussian-Fourier time-embedding dim (FiLM conditioning)
 ema_decay: 0.999       # weight-EMA decay used for validation + saved checkpoints
 
+# Absolute-position input channels (review item 1: the "8 sheets" fix).
+# SparseConv3d is translation-equivariant → the net cannot tell ground from sky.
+# Inject height-above-ground as an input channel (CoordConv).  Derived from the
+# grid at every call, so train and inference are identical.  coord_h_ref/xy_ref
+# are physical normalizers in metres (voxel_size=0.8, footprint 64*0.8≈51m,
+# scenes ≈0..28m tall).  Keep inference grid consistent: voxel_size 0.8, nz≈36.
+#   coord_features: z   → height only (recommended; keeps XY translation-invariance)
+#   coord_features: xyz → also per-sample-anchored x,y
+#   coord_features: none→ legacy (no absolute position)
+coord_features: z
+coord_h_ref: 30.0
+coord_xy_ref: 51.0
+
 # Noise-level loss weighting on the geometry MSE (advice.md item 7).
 #   loss_weighting: p2       → P2-true on the x0 head: SNR·(p2_k+SNR)^(−p2_gamma)
 #   loss_weighting: min_snr  → Min-SNR-γ: min(SNR, min_snr_gamma)  [for A/B]

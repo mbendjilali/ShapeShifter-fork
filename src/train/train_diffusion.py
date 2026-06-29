@@ -250,6 +250,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             in_channels=n_channels,
             out_channels=n_channels,
             dropout=cfg.get("dropout", 0.01),
+            coord_features=cfg.get("coord_features", "none"),
+            coord_h_ref=cfg.get("coord_h_ref", 30.0),
+            coord_xy_ref=cfg.get("coord_xy_ref", 51.0),
         ).to(device)
     else:
         model = DiffusionCNN(
@@ -260,6 +263,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             first_ks=cfg["first_ks"],
             in_channels=n_channels,
             out_channels=n_channels,
+            coord_features=cfg.get("coord_features", "none"),
+            coord_h_ref=cfg.get("coord_h_ref", 30.0),
+            coord_xy_ref=cfg.get("coord_xy_ref", 51.0),
         ).to(device)
     if is_main:
         count_parameters(model)

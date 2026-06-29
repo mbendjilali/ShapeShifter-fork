@@ -21,49 +21,42 @@ def compute_base_grid(model_name, eval_batch_size, base_res=16, src_path="./data
 
 
 def compute_canonical_base_grid(
-    base_res: int = 16,
-    extent_m: float = 50.0,
+    nx: int = 64,
+    nz: int = 36,
+    voxel_size: float = 0.8,
     batch: int = 1,
     device: str = "cuda",
-    nz: int = None,
 ):
     """
     DALES unconditional sampling: a fully-occupied dense base grid.
 
-    At level 0 for 100×100m crops (base_res=16, voxel_size=6.25m):
-      - XY: 16 × 16 voxels (100m)
-      - Z:  nz voxels (default: ceil(50m / voxel_size) = ceil(50/6.25) = 8)
+    This MUST match the training-window geometry, or the denoiser is queried
+    off-distribution (the previous version used voxel_size=1.5625m and nz=8 —
+    both wrong — which produced the stacked flat sheets).  Encoded crops use
+    voxel_size=0.8m, ~64 voxels in XY (a clipped window) and ~36 voxels of
+    vertical extent (≈ ground→28m).  The world-Z origin is voxel_size/2, exactly
+    as in encoding, so the height feature (grid_coord_features) reads identically
+    here and in training: the bottom layer is ground (height 0).
 
-    All voxels start active (mask=+1); the diffusion model prunes via the mask
-    channel during sampling.
+    All voxels start active (mask=+1); the model prunes via the mask channel.
 
     Parameters
     ----------
-    base_res : int
-        Number of voxels in X and Y (default 16).
-    extent_m : float
-        Physical XY extent of one crop in metres (default 100.0 for DALES crops).
-    batch : int
-        Batch size (number of independent samples).
+    nx : int        Number of voxels in X and Y (footprint), default 64.
+    nz : int        Number of voxels in Z (vertical extent), default 36.
+    voxel_size : float  Metres per voxel — must equal the encoding value (0.8).
+    batch : int     Number of independent samples.
     device : str
-    nz : int | None
-        Number of voxels in Z. Defaults to base_res (isotropic grid).
-        Pass 8 for 100×100m DALES crops (covers 0..50m above ground at 6.25m/voxel).
 
     Returns
     -------
-    fvdb.GridBatch — a dense base_res × base_res × nz grid (all voxels active).
+    fvdb.GridBatch — a dense nx × nx × nz grid (all voxels active).
     """
     import fvdb
-    import math
 
-    voxel_size = extent_m / base_res
-    if nz is None:
-        # isotropic cube by default; caller can override for non-square shapes
-        nz = base_res
     vox_origin = torch.tensor([voxel_size / 2.0] * 3, dtype=torch.float32, device=device)
 
-    ix = torch.arange(base_res, device=device)
+    ix = torch.arange(nx, device=device)
     iz = torch.arange(nz, device=device)
     gi, gj, gk = torch.meshgrid(ix, ix, iz, indexing="ij")
     ijk = torch.stack([gi.flatten(), gj.flatten(), gk.flatten()], dim=-1).to(torch.int32)
@@ -93,11 +86,16 @@ def load_dales_diffusion(level, src):
     cfg = ckpt["config"]
     state_dict = ckpt["model_state_dict"]
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    from utils.model import _COORD_DIMS
+    coord_features = cfg.get("coord_features", "none")
+    coord_h_ref = cfg.get("coord_h_ref", 30.0)
+    coord_xy_ref = cfg.get("coord_xy_ref", 51.0)
+    n_coord = _COORD_DIMS[coord_features]
     unet_depth = cfg.get("unet_depth", 0)
     if unet_depth > 0:
-        # FiLM U-Net: time is conditioned, not concatenated → the stem conv's
-        # in_channels equals the data channel count (no +time_emb).
-        in_channels = state_dict["input_conv.0.weight"].shape[1]
+        # FiLM U-Net: time is conditioned, not concatenated; the stem conv's
+        # in_channels = data channels + coordinate channels, so subtract coords.
+        in_channels = state_dict["input_conv.0.weight"].shape[1] - n_coord
         model = DiffusionUNet(
             channels=cfg["features"],
             unet_depth=unet_depth,
@@ -107,12 +105,15 @@ def load_dales_diffusion(level, src):
             in_channels=in_channels,
             out_channels=in_channels,
             dropout=cfg.get("dropout", 0.01),
+            coord_features=coord_features,
+            coord_h_ref=coord_h_ref,
+            coord_xy_ref=coord_xy_ref,
         ).to(device)
     else:
-        # Legacy DiffusionCNN: time IS concatenated at the stem → subtract it.
-        # [C_out, in_channels + time_emb, k, k, k]
+        # Legacy DiffusionCNN: time AND coords are concatenated at the stem.
+        # [C_out, in_channels + time_emb + n_coord, k, k, k]
         first_w = next(iter(state_dict.values()))
-        in_channels = first_w.shape[1] - cfg["time_emb"]
+        in_channels = first_w.shape[1] - cfg["time_emb"] - n_coord
         model = DiffusionCNN(
             channels=cfg["features"],
             layers=cfg["layers"],
@@ -121,6 +122,9 @@ def load_dales_diffusion(level, src):
             first_ks=cfg["first_ks"],
             in_channels=in_channels,
             out_channels=in_channels,
+            coord_features=coord_features,
+            coord_h_ref=coord_h_ref,
+            coord_xy_ref=coord_xy_ref,
         ).to(device)
     model.load_state_dict(state_dict)
     model_upsampler = None
@@ -143,14 +147,14 @@ def load_dales_diffusion(level, src):
 
 def compute_all_generations_dales(
     src,
-    base_res=16,
-    extent_m=100.0,
+    nx=64,
+    voxel_size=0.8,
     max_level=4,
     eval_batch_size=5,
     features=13,
     ddim_steps=None,
     verbose=False,
-    nz=8,
+    nz=36,
     target_class=None,
 ):
     """
@@ -169,7 +173,8 @@ def compute_all_generations_dales(
     diffusion0 = load_dales_diffusion(0, src)
     diffusion0.eval()
 
-    X0G = compute_canonical_base_grid(base_res, extent_m, eval_batch_size, device, nz=nz)
+    X0G = compute_canonical_base_grid(
+        nx=nx, nz=nz, voxel_size=voxel_size, batch=eval_batch_size, device=device)
     t0 = time.time()
 
     noisy_init = grid_to_VDB(X0G, torch.randn, [features])
@@ -311,9 +316,12 @@ if __name__ == '__main__':
                         help='Crops generated per forward pass')
     parser.add_argument('-total_num', default=20, type=int,
                         help='Total number of crops to generate')
-    parser.add_argument('-base_res', default=64, type=int)
-    parser.add_argument('-nz', default=8, type=int,
-                        help='Z voxels at level 0 (DALES 100m crops: 8 → covers 0..50m at 6.25m/vox)')
+    parser.add_argument('-base_res', default=64, type=int,
+                        help='XY voxels of the level-0 canonical grid (footprint), matching training clips')
+    parser.add_argument('-voxel_size', default=0.8, type=float,
+                        help='Metres per voxel at level 0 — MUST match encoding (0.8)')
+    parser.add_argument('-nz', default=36, type=int,
+                        help='Z voxels at level 0 (0.8m/vox → 36 ≈ ground..28m, matching DALES crops)')
     parser.add_argument('-class', dest='target_class', default=None, type=int,
                         help='Clamp class channels to this label during sampling (0-7, repaint-style)')
     args = parser.parse_args()
@@ -337,7 +345,8 @@ if __name__ == '__main__':
             with torch.no_grad():
                 GX = compute_all_generations_dales(
                     src=SRC,
-                    base_res=args.base_res,
+                    nx=args.base_res,
+                    voxel_size=args.voxel_size,
                     max_level=args.levels,
                     eval_batch_size=args.batch_size,
                     ddim_steps=args.ddim_steps,

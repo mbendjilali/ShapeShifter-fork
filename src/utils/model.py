@@ -25,13 +25,55 @@ def sinusoidal_embedding(timesteps, dim):
     return torch.cat([emb.sin(), emb.cos()], dim=-1)
 
 
+_COORD_DIMS = {'none': 0, 'z': 1, 'xyz': 3}
+
+
+def grid_coord_features(grid, jidx, mode, h_ref, xy_ref):
+    """Per-voxel absolute-position features for the model input.
+
+    SparseConv3d is translation-equivariant, so the network has no notion of
+    *where* a voxel sits — it cannot tell ground from sky.  This injects that
+    notion explicitly as input channels, the standard CoordConv fix.
+
+    The feature is height-above-the-sample's-lowest-voxel (≈ height above
+    ground), normalized by a fixed physical reference `h_ref` (metres), so it is
+    terrain-invariant and identical in meaning at train and inference time.
+    'xyz' additionally adds per-sample-min-anchored x,y (normalized by xy_ref);
+    'z' (recommended) keeps horizontal translation invariance, which is
+    desirable for aerial scenes.  Returns (N, C) aligned to `grid.ijk` / jdata
+    order, or None for mode='none'.
+    """
+    if mode == 'none':
+        return None
+    w = grid.grid_to_world(grid.ijk.float()).jdata   # (N, 3) world metres
+    jidx = jidx.long()
+    B = grid.grid_count
+
+    def anchored(col, ref):
+        v = w[:, col]
+        vmin = torch.full((B,), float('inf'), device=w.device, dtype=w.dtype)
+        vmin = vmin.scatter_reduce(0, jidx, v, reduce='amin', include_self=True)
+        vmin = torch.where(torch.isinf(vmin), torch.zeros_like(vmin), vmin)
+        return ((v - vmin[jidx]) / ref)[:, None]
+
+    feats = [anchored(2, h_ref)]                      # z (height above ground)
+    if mode == 'xyz':
+        feats += [anchored(0, xy_ref), anchored(1, xy_ref)]
+    return torch.cat(feats, dim=-1)
+
+
 class DiffusionCNN(nn.Module):
-    def __init__(self, channels, layers=2, time_emb=6, one_layers=1, first_ks=3, in_channels=1, out_channels=1, dropout=.01):
+    def __init__(self, channels, layers=2, time_emb=6, one_layers=1, first_ks=3, in_channels=1, out_channels=1, dropout=.01,
+                 coord_features='none', coord_h_ref=30.0, coord_xy_ref=51.0):
         super(DiffusionCNN, self).__init__()
         self.out_channels = out_channels
         self.time_emb = time_emb
+        self.coord_features = coord_features
+        self.coord_h_ref = coord_h_ref
+        self.coord_xy_ref = coord_xy_ref
+        n_coord = _COORD_DIMS[coord_features]
         self.net = [
-            fvnn.SparseConv3d(in_channels+self.time_emb,
+            fvnn.SparseConv3d(in_channels+self.time_emb+n_coord,
                               channels, kernel_size=first_ks, stride=1),
             fvnn.Dropout(dropout),
             fvnn.SiLU(inplace=True)]
@@ -52,8 +94,14 @@ class DiffusionCNN(nn.Module):
 
     def forward(self, x, t, cond=None):
         t = sinusoidal_embedding(t, self.time_emb)
+        parts = [x.data.jdata, t]
+        coords = grid_coord_features(
+            x.grid, x.data.jidx, getattr(self, 'coord_features', 'none'),
+            getattr(self, 'coord_h_ref', 30.0), getattr(self, 'coord_xy_ref', 51.0))
+        if coords is not None:
+            parts.insert(1, coords.to(x.data.jdata.dtype))
         new_x = fvnn.VDBTensor(x.grid, x.grid.jagged_like(
-            torch.cat((x.data.jdata, t), -1)))
+            torch.cat(parts, -1)))
         return self.net(new_x)
 
 
@@ -202,10 +250,18 @@ class DiffusionUNet(nn.Module):
     """
 
     def __init__(self, channels, unet_depth=2, time_emb=128, one_layers=2,
-                 first_ks=3, in_channels=1, out_channels=1, dropout=0.01):
+                 first_ks=3, in_channels=1, out_channels=1, dropout=0.01,
+                 coord_features='none', coord_h_ref=30.0, coord_xy_ref=51.0):
         super().__init__()
         self.time_emb = time_emb
         self.unet_depth = unet_depth
+
+        # Absolute-position input channels (CoordConv) — see grid_coord_features.
+        # Stored as attributes so a pickled model reproduces them at inference.
+        self.coord_features = coord_features
+        self.coord_h_ref = coord_h_ref
+        self.coord_xy_ref = coord_xy_ref
+        n_coord = _COORD_DIMS[coord_features]
 
         temb_dim = channels * 4
         self.time_mlp = nn.Sequential(
@@ -215,9 +271,10 @@ class DiffusionUNet(nn.Module):
             nn.Linear(temb_dim, temb_dim),
         )
 
-        # Time is conditioned via FiLM, not concatenation → stem sees in_channels only.
+        # Time is conditioned via FiLM, not concatenation → stem sees the data
+        # channels plus the (non-diffused) coordinate channels.
         self.input_conv = nn.Sequential(
-            fvnn.SparseConv3d(in_channels, channels, kernel_size=first_ks, stride=1),
+            fvnn.SparseConv3d(in_channels + n_coord, channels, kernel_size=first_ks, stride=1),
             _SparseLayerNorm(channels),
             fvnn.Dropout(dropout),
             fvnn.SiLU(inplace=True),
@@ -254,6 +311,16 @@ class DiffusionUNet(nn.Module):
         t_per_sample = torch.zeros(x.grid.grid_count, device=t.device, dtype=t.dtype)
         t_per_sample[jidx_in] = t.to(t_per_sample.dtype)
         temb = self.time_mlp(t_per_sample)               # (B, temb_dim)
+
+        # Append absolute-position channels before the stem (not diffused; derived
+        # fresh from the grid so train and inference are identical).
+        coords = grid_coord_features(
+            x.grid, x.data.jidx, getattr(self, 'coord_features', 'none'),
+            getattr(self, 'coord_h_ref', 30.0), getattr(self, 'coord_xy_ref', 51.0))
+        if coords is not None:
+            coords = coords.to(x.data.jdata.dtype)
+            x = fvnn.VDBTensor(
+                x.grid, x.grid.jagged_like(torch.cat([x.data.jdata, coords], dim=-1)))
 
         x = self.input_conv(x)
 
