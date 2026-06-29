@@ -76,7 +76,7 @@ def load_dales_diffusion(level, src):
     """Load a DALES checkpoint: {src}/dales_{level}_*.pt (picks most recent)."""
     import utils.fvdb_diffusion as _fvdb_diffusion
     import utils.model as _model
-    from utils.model import DiffusionCNN
+    from utils.model import DiffusionCNN, DiffusionUNet
     from utils.fvdb_diffusion import SparseDiffusion
     # Checkpoints were pickled under old top-level names; remap so unpickling works.
     sys.modules.setdefault('fvdb_diffusion', _fvdb_diffusion)
@@ -92,19 +92,36 @@ def load_dales_diffusion(level, src):
     # Best-epoch dict format: reconstruct SparseDiffusion from config + state dict.
     cfg = ckpt["config"]
     state_dict = ckpt["model_state_dict"]
-    # Infer in_channels from first conv weight shape: [C_out, in_channels+time_emb, ...]
-    first_w = next(iter(state_dict.values()))
-    in_channels = first_w.shape[1] - cfg["time_emb"]
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = DiffusionCNN(
-        channels=cfg["features"],
-        layers=cfg["layers"],
-        time_emb=cfg["time_emb"],
-        one_layers=cfg["one_layers"],
-        first_ks=cfg["first_ks"],
-        in_channels=in_channels,
-        out_channels=in_channels,
-    ).to(device)
+    unet_depth = cfg.get("unet_depth", 0)
+    if unet_depth > 0:
+        # FiLM U-Net: time is conditioned, not concatenated → the stem conv's
+        # in_channels equals the data channel count (no +time_emb).
+        in_channels = state_dict["input_conv.0.weight"].shape[1]
+        model = DiffusionUNet(
+            channels=cfg["features"],
+            unet_depth=unet_depth,
+            time_emb=cfg["time_emb"],
+            one_layers=cfg["one_layers"],
+            first_ks=cfg["first_ks"],
+            in_channels=in_channels,
+            out_channels=in_channels,
+            dropout=cfg.get("dropout", 0.01),
+        ).to(device)
+    else:
+        # Legacy DiffusionCNN: time IS concatenated at the stem → subtract it.
+        # [C_out, in_channels + time_emb, k, k, k]
+        first_w = next(iter(state_dict.values()))
+        in_channels = first_w.shape[1] - cfg["time_emb"]
+        model = DiffusionCNN(
+            channels=cfg["features"],
+            layers=cfg["layers"],
+            time_emb=cfg["time_emb"],
+            one_layers=cfg["one_layers"],
+            first_ks=cfg["first_ks"],
+            in_channels=in_channels,
+            out_channels=in_channels,
+        ).to(device)
     model.load_state_dict(state_dict)
     model_upsampler = None
     if level > 0:
@@ -118,6 +135,7 @@ def load_dales_diffusion(level, src):
         max_T=cfg.get("max_T", None) if level > 0 else None,
         n_classes=cfg["n_classes"],
         model_upsampler=model_upsampler,
+        occupancy_objective=cfg.get("occupancy_objective", "mse"),
     ).to(device)
     diffusion.eval()
     return diffusion

@@ -43,7 +43,7 @@ class DiffusionCNN(nn.Module):
             ]
         for _ in range(one_layers):
             self.net += [
-                fvnn.SparseConv3d(channels, channels, kernel_size=1, stride=1),
+                fvnn.SparseConv3d(channels, channels, kernel_size=3, stride=1),
                 fvnn.SiLU(inplace=True)
             ]
         self.net.append(fvnn.SparseConv3d(
@@ -55,6 +55,222 @@ class DiffusionCNN(nn.Module):
         new_x = fvnn.VDBTensor(x.grid, x.grid.jagged_like(
             torch.cat((x.data.jdata, t), -1)))
         return self.net(new_x)
+
+
+class _SparseLayerNorm(nn.Module):
+    """LayerNorm over the channel dim of a VDBTensor's jdata (N_voxels, C)."""
+    def __init__(self, channels):
+        super().__init__()
+        self.ln = nn.LayerNorm(channels)
+
+    def forward(self, x: fvnn.VDBTensor) -> fvnn.VDBTensor:
+        return fvnn.VDBTensor(x.grid, x.grid.jagged_like(self.ln(x.data.jdata)))
+
+
+class GaussianFourierProjection(nn.Module):
+    """
+    Random-Fourier time embedding for continuous t ∈ [0,1] (EDM / NCSN++ style).
+    """
+    def __init__(self, embed_dim, scale=16.0):
+        super().__init__()
+        assert embed_dim % 2 == 0, "embed_dim must be even"
+        self.register_buffer("freqs", torch.randn(embed_dim // 2) * scale)
+
+    def forward(self, t):  # t: (B,) in [0,1]  →  (B, embed_dim)
+        proj = t[:, None] * self.freqs[None, :] * 2 * torch.pi
+        return torch.cat([proj.sin(), proj.cos()], dim=-1)
+
+
+class FiLM(nn.Module):
+    """Feature-wise linear modulation of a VDBTensor by a per-sample embedding.
+
+    Produces per-channel (scale, shift) from the time embedding and broadcasts
+    them to every voxel via the grid's per-voxel batch index (``jidx``), which
+    fVDB keeps correct at every resolution — so σ reaches the bottleneck and
+    decoder, not just the stem.
+    """
+    def __init__(self, temb_dim, channels):
+        super().__init__()
+        self.lin = nn.Linear(temb_dim, 2 * channels)
+        # zero-init → blocks start as identity-modulated (stable warm start)
+        nn.init.zeros_(self.lin.weight)
+        nn.init.zeros_(self.lin.bias)
+
+    def forward(self, x: fvnn.VDBTensor, temb) -> fvnn.VDBTensor:
+        scale, shift = self.lin(temb).chunk(2, dim=-1)   # (B, C) each
+        jidx = x.data.jidx.long()
+        mod = x.data.jdata * (1 + scale[jidx]) + shift[jidx]
+        return fvnn.VDBTensor(x.grid, x.grid.jagged_like(mod))
+
+
+class _ConvLNStack(nn.Module):
+    """A conv→LN sub-stack that defers activation, so FiLM can be applied
+    between normalization and the nonlinearity (standard FiLM placement)."""
+    def __init__(self, *layers):
+        super().__init__()
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+class FiLMEncoderBlock(nn.Module):
+    """ks=3 → LN → FiLM → SiLU → ks=3 → LN → Dropout → SiLU (FiLM injects σ once)."""
+    def __init__(self, channels, temb_dim, dropout):
+        super().__init__()
+        self.norm1 = _SparseLayerNorm(channels)
+        self.film = FiLM(temb_dim, channels)
+        self.act1 = fvnn.SiLU(inplace=True)
+        self.conv2 = fvnn.SparseConv3d(channels, channels, kernel_size=3, stride=1)
+        self.tail = nn.Sequential(
+            _SparseLayerNorm(channels), fvnn.Dropout(dropout), fvnn.SiLU(inplace=True),
+        )
+
+    def forward(self, x, temb):
+        x = self.norm1(x)
+        x = self.film(x, temb)
+        x = self.act1(x)
+        x = self.conv2(x)
+        return self.tail(x)
+
+
+class FiLMDecoderBlock(nn.Module):
+    """ks=1 (2ch→ch) → LN → FiLM → SiLU → ks=3 → LN → Dropout → SiLU."""
+    def __init__(self, channels, temb_dim, dropout):
+        super().__init__()
+        self.proj = fvnn.SparseConv3d(channels * 2, channels, kernel_size=1, stride=1)
+        self.norm1 = _SparseLayerNorm(channels)
+        self.film = FiLM(temb_dim, channels)
+        self.act1 = fvnn.SiLU(inplace=True)
+        self.conv2 = fvnn.SparseConv3d(channels, channels, kernel_size=3, stride=1)
+        self.tail = nn.Sequential(
+            _SparseLayerNorm(channels), fvnn.Dropout(dropout), fvnn.SiLU(inplace=True),
+        )
+
+    def forward(self, x, temb):
+        x = self.proj(x)
+        x = self.norm1(x)
+        x = self.film(x, temb)
+        x = self.act1(x)
+        x = self.conv2(x)
+        return self.tail(x)
+
+
+class FiLMBottleneckBlock(nn.Module):
+    """ks=3 → LN → FiLM → SiLU, repeated `n` times — keeps σ present at the
+    coarsest scale where one voxel covers a tile-wide physical area."""
+    def __init__(self, channels, temb_dim, n):
+        super().__init__()
+        self.convs = nn.ModuleList(
+            fvnn.SparseConv3d(channels, channels, kernel_size=3, stride=1) for _ in range(n))
+        self.norms = nn.ModuleList(_SparseLayerNorm(channels) for _ in range(n))
+        self.films = nn.ModuleList(FiLM(temb_dim, channels) for _ in range(n))
+        self.act = fvnn.SiLU(inplace=True)
+
+    def forward(self, x, temb):
+        for conv, norm, film in zip(self.convs, self.norms, self.films):
+            x = conv(x)
+            x = norm(x)
+            x = film(x, temb)
+            x = self.act(x)
+        return x
+
+
+class DiffusionUNet(nn.Module):
+    """
+    U-Net variant of DiffusionCNN with FiLM noise conditioning.
+
+    All levels share the same channel width (`channels`).  Skip connections
+    concatenate encoder and decoder features (2×channels) then project back
+    to `channels` — no channel explosion at any resolution.
+
+    Noise level σ(t) is no longer concatenated to the input once at the stem
+    (where it is averaged away by the first downsample).  Instead t is mapped
+    through a Gaussian-Fourier embedding → 2-layer MLP → a shared time vector,
+    and injected as FiLM (per-channel scale+shift) into *every* encoder,
+    bottleneck and decoder block.  This is the standard ADM/EDM conditioning
+    and is what lets a population denoiser resolve adjacent noise levels.
+
+    `time_emb` is the Gaussian-Fourier dimension (≥128 recommended); the MLP
+    width is `channels * 4`.
+
+    Architecture per depth level:
+      Encoder:  stride-2 down  →  [LN → FiLM → SiLU → ks=3 → LN → Drop → SiLU]
+      Decoder:  transposed up  →  cat(skip)  →  [ks=1(2ch→ch) → LN → FiLM → SiLU
+                                                 → ks=3 → LN → Drop → SiLU]
+      Bottleneck: one_layers × [ks=3 → LN → FiLM → SiLU]
+    """
+
+    def __init__(self, channels, unet_depth=2, time_emb=128, one_layers=2,
+                 first_ks=3, in_channels=1, out_channels=1, dropout=0.01):
+        super().__init__()
+        self.time_emb = time_emb
+        self.unet_depth = unet_depth
+
+        temb_dim = channels * 4
+        self.time_mlp = nn.Sequential(
+            GaussianFourierProjection(time_emb),
+            nn.Linear(time_emb, temb_dim),
+            nn.SiLU(),
+            nn.Linear(temb_dim, temb_dim),
+        )
+
+        # Time is conditioned via FiLM, not concatenation → stem sees in_channels only.
+        self.input_conv = nn.Sequential(
+            fvnn.SparseConv3d(in_channels, channels, kernel_size=first_ks, stride=1),
+            _SparseLayerNorm(channels),
+            fvnn.Dropout(dropout),
+            fvnn.SiLU(inplace=True),
+        )
+
+        self.encoder_downs = nn.ModuleList()
+        self.encoder_blocks = nn.ModuleList()
+        for _ in range(unet_depth):
+            self.encoder_downs.append(
+                fvnn.SparseConv3d(channels, channels, kernel_size=2, stride=2)
+            )
+            self.encoder_blocks.append(FiLMEncoderBlock(channels, temb_dim, dropout))
+
+        self.bottleneck = FiLMBottleneckBlock(channels, temb_dim, one_layers)
+
+        self.decoder_ups = nn.ModuleList()
+        self.decoder_blocks = nn.ModuleList()
+        for _ in range(unet_depth):
+            self.decoder_ups.append(
+                fvnn.SparseConv3d(channels, channels, kernel_size=2, stride=2, transposed=True)
+            )
+            self.decoder_blocks.append(FiLMDecoderBlock(channels, temb_dim, dropout))
+
+        self.output_conv = fvnn.SparseConv3d(channels, out_channels, kernel_size=1, stride=1)
+
+    def _cat(self, x: fvnn.VDBTensor, skip: fvnn.VDBTensor) -> fvnn.VDBTensor:
+        merged = torch.cat([x.data.jdata, skip.data.jdata], dim=-1)
+        return fvnn.VDBTensor(x.grid, x.grid.jagged_like(merged))
+
+    def forward(self, x, t, cond=None):
+        # t arrives per-voxel (constant within a sample); collapse to one value
+        # per sample, embed, then broadcast back via jidx inside each FiLM layer.
+        jidx_in = x.data.jidx.long()
+        t_per_sample = torch.zeros(x.grid.grid_count, device=t.device, dtype=t.dtype)
+        t_per_sample[jidx_in] = t.to(t_per_sample.dtype)
+        temb = self.time_mlp(t_per_sample)               # (B, temb_dim)
+
+        x = self.input_conv(x)
+
+        skips = []
+        for down, block in zip(self.encoder_downs, self.encoder_blocks):
+            skips.append(x)
+            x = down(x)
+            x = block(x, temb)
+
+        x = self.bottleneck(x, temb)
+
+        for up, block, skip in zip(self.decoder_ups, self.decoder_blocks, reversed(skips)):
+            x = up(x, out_grid=skip.grid)
+            x = self._cat(x, skip)
+            x = block(x, temb)
+
+        return self.output_conv(x)
 
 
 class UpSampler(nn.Module):
