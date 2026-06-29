@@ -58,6 +58,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         occ_min_snr_gamma=None,
         occ_logsnr_min=-2.0,
         per_sigma_bins=5,
+        mask_input_dropout=0.0,
     ):
         super().__init__()
         self.model = model
@@ -109,6 +110,17 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         self.occ_logsnr_min = occ_logsnr_min
         # Number of σ buckets for the per-noise-level diagnostics (review item a).
         self.per_sigma_bins = per_sigma_bins
+
+        # Mask-input dropout — the leak fix.  The per-σ IoU curve revealed the
+        # occupancy head was learned by *copying* the noised mask channel from its
+        # own input (IoU 0.99 at low σ), not by generating structure — so at
+        # sampling (no mask to copy) it floods to "occupied everywhere" (the dense
+        # cube).  With probability p we replace the input mask channel with zeros
+        # for whole samples, so the head must predict occupancy from the
+        # geometry/semantics/coordinate context (which *are* generated) instead of
+        # the leaked mask.  p=1.0 ⇒ occupancy is purely a structure predictor on
+        # the generated features (recommended experiment); p=0.0 ⇒ legacy.
+        self.mask_input_dropout = mask_input_dropout
 
         if noise_schedule == "linear":
             self.log_snr = beta_linear_log_snr
@@ -353,6 +365,19 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         times = times[X.data.jidx.long()]
 
         noisy_latents, target_X = self.q_sample(X, times, X_Blur)
+
+        # Mask-input dropout (the leak fix): zero the input mask channel for a
+        # random subset of samples so the occupancy head cannot copy it and must
+        # predict structure from the (generated) geometry/semantics/coords.
+        if self.occupancy_objective == 'bce' and self.mask_input_dropout > 0:
+            drop_sample = (torch.rand(X.grid_count, device=self.device)
+                           < self.mask_input_dropout)
+            drop_vox = drop_sample[X.data.jidx.long()]
+            if drop_vox.any():
+                nl = noisy_latents.jdata.clone()
+                nl[drop_vox, -1] = 0.0
+                noisy_latents = fvnn.VDBTensor(
+                    noisy_latents.grid, noisy_latents.grid.jagged_like(nl))
 
         # prediction
         pred: fvnn.VDBTensor = self.model(noisy_latents, times)

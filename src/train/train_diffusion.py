@@ -300,6 +300,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         occ_min_snr_gamma=cfg.get("occ_min_snr_gamma", None),
         occ_logsnr_min=cfg.get("occ_logsnr_min", -2.0),
         per_sigma_bins=cfg.get("per_sigma_bins", 5),
+        mask_input_dropout=cfg.get("mask_input_dropout", 0.0),
     ).to(device)
 
     if world_size > 1:

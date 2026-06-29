@@ -47,7 +47,7 @@ ema_decay: 0.999       # weight-EMA decay used for validation + saved checkpoint
 #   coord_features: z   → height only (recommended; keeps XY translation-invariance)
 #   coord_features: xyz → also per-sample-anchored x,y
 #   coord_features: none→ legacy (no absolute position)
-coord_features: z
+coord_features: xyz
 coord_h_ref: 30.0
 coord_xy_ref: 51.0
 
@@ -71,6 +71,16 @@ occ_pos_weight_max: 8.0       # cap on pos_weight=#empty/#occ (was 50; 50 fires 
 occ_loss_weight: 1.0
 occ_label_smoothing: 0.05    # targets 0,1 → 0.05,0.95: bounds the BCE so val
                              # occupancy can't explode from over-confidence
+
+# Mask-input dropout (the leak fix).  The per-σ IoU curve showed the occupancy
+# head was copying the noised mask from its own input (IoU 0.99 at low σ) rather
+# than generating it — so at sampling it floods to occupied-everywhere (the dense
+# cube).  With prob p, zero the input mask channel for whole samples so the head
+# must infer occupancy from generated geometry/semantics/coords.
+#   1.0 → occupancy is purely a structure predictor on generated features (try this)
+#   0.0 → legacy (leak intact)
+# With this on, the per-σ val IoU becomes the *honest* from-scratch occupancy skill.
+mask_input_dropout: 1.0
 
 # σ-weighting of the occupancy BCE (review item b).  Unweighted BCE wastes ~half
 # its gradient on the high-σ regime where x_t is pure noise and occupancy is an
