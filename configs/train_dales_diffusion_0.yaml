@@ -11,7 +11,7 @@ layers: 3
 first_ks: 3
 one_layers: 6
 features: 128
-epochs: 90
+epochs: 50
 
 n_classes: 8
 class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
@@ -58,6 +58,19 @@ occ_pos_weight_max: 8.0       # cap on pos_weight=#empty/#occ (was 50; 50 fires 
 occ_loss_weight: 1.0
 occ_label_smoothing: 0.05    # targets 0,1 → 0.05,0.95: bounds the BCE so val
                              # occupancy can't explode from over-confidence
+
+# σ-weighting of the occupancy BCE (review item b).  Unweighted BCE wastes ~half
+# its gradient on the high-σ regime where x_t is pure noise and occupancy is an
+# irreducible entropy floor.  Reallocate it toward the mid/low-σ band where
+# structure is recoverable.  Start with min_snr; A/B against ~ and clip_high_sigma.
+#   occ_loss_weighting: min_snr         → w = min(SNR, occ_min_snr_gamma)
+#   occ_loss_weighting: snr             → w = SNR (aggressive low-σ)
+#   occ_loss_weighting: clip_high_sigma → w = 1[log_snr ≥ occ_logsnr_min]
+#   occ_loss_weighting: ~               → uniform (legacy)
+occ_loss_weighting: min_snr
+occ_min_snr_gamma: 5.0
+occ_logsnr_min: -2.0         # only used by clip_high_sigma
+per_sigma_bins: 5            # # of noise-level buckets for the per-σ diagnostics
 diffusion_timesteps: 1000
 save_every: 10
 val_every: 2

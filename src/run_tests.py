@@ -187,7 +187,7 @@ def parse_args():
         help="Dataset split used when resolving a bare crop ID.",
     )
     a_group.add_argument(
-        "--t_list", type=float, nargs="+", default=[2.0],
+        "--t_list", type=float, nargs="+", default=[1.0],
         help="Noise fractions for test_A (0.0–1.0).",
     )
 

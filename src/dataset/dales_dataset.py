@@ -323,6 +323,9 @@ class DALESDataset:
         bce_losses = []
         occ_losses = []
         occ_ious = []
+        occ_only_mses = []
+        occ_only_ces = []
+        bin_bce_sum = bin_iou_sum = bin_cnt = None
         for crop_id in sample_ids:
             if level == 0:
                 if crop_id in self._dense_cache:
@@ -331,23 +334,42 @@ class DALESDataset:
                 else:
                     X0 = self.load_crop_level0(split, crop_id, device)
                 with torch.no_grad():
-                    mse_loss, bce_loss, occ_loss, _, _, occ_iou = diffusion(X0)
+                    mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion(X0)
             else:
                 X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
                 with torch.no_grad():
                     X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
                     X0_BLUR.grid = X0.grid
                     x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
-                    mse_loss, bce_loss, occ_loss, _, _, occ_iou = diffusion(x0c, blurc)
+                    mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion(x0c, blurc)
             mse_losses.append(mse_loss)
             bce_losses.append(bce_loss)
             occ_losses.append(occ_loss)
             occ_ious.append(occ_iou)
+            occ_only_mses.append(metrics['occ_only_mse'])
+            occ_only_ces.append(metrics['occ_only_ce'])
+            # NaN-aware accumulation of the per-σ buckets across crops.
+            b_sig, i_sig = metrics['bce_per_sigma'], metrics['iou_per_sigma']
+            if bin_bce_sum is None:
+                bin_bce_sum = torch.zeros_like(b_sig)
+                bin_iou_sum = torch.zeros_like(i_sig)
+                bin_cnt     = torch.zeros_like(b_sig)
+            valid = ~torch.isnan(b_sig)
+            bin_bce_sum[valid] += b_sig[valid]
+            bin_iou_sum[valid] += i_sig[valid]
+            bin_cnt[valid]     += 1
 
+        val_metrics = {
+            'occ_only_mse': sum(occ_only_mses) / len(occ_only_mses),
+            'occ_only_ce':  sum(occ_only_ces) / len(occ_only_ces),
+            'bce_per_sigma': bin_bce_sum / bin_cnt.clamp(min=1),
+            'iou_per_sigma': bin_iou_sum / bin_cnt.clamp(min=1),
+        }
         return (sum(mse_losses) / len(mse_losses),
                 sum(bce_losses) / len(bce_losses),
                 sum(occ_losses) / len(occ_losses),
-                sum(occ_ious) / len(occ_ious))
+                sum(occ_ious) / len(occ_ious),
+                val_metrics)
 
     # ------------------------------------------------------------------
     # Debug / stats

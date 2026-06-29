@@ -290,6 +290,10 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         occ_pos_weight_max=cfg.get("occ_pos_weight_max", 50.0),
         occ_loss_weight=cfg.get("occ_loss_weight", 1.0),
         occ_label_smoothing=cfg.get("occ_label_smoothing", 0.0),
+        occ_loss_weighting=cfg.get("occ_loss_weighting", None),
+        occ_min_snr_gamma=cfg.get("occ_min_snr_gamma", None),
+        occ_logsnr_min=cfg.get("occ_logsnr_min", -2.0),
+        per_sigma_bins=cfg.get("per_sigma_bins", 5),
     ).to(device)
 
     if world_size > 1:
@@ -336,6 +340,16 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             epoch_bce_loss_sum = 0.0
             epoch_occ_loss_sum = 0.0
             epoch_occ_iou_sum = 0.0
+            # Diagnostics (review item a): occupied-only geometry/class error and
+            # per-σ occupancy BCE/IoU, accumulated per micro-batch (NaN-aware for
+            # empty σ buckets).
+            n_bins = cfg.get("per_sigma_bins", 5)
+            epoch_occ_only_mse_sum = 0.0
+            epoch_occ_only_ce_sum = 0.0
+            n_micro = 0
+            bin_bce_sum = torch.zeros(n_bins, device=device)
+            bin_iou_sum = torch.zeros(n_bins, device=device)
+            bin_cnt     = torch.zeros(n_bins, device=device)
 
             for _ in range(grad_steps_per_epoch):
                 optimizer.zero_grad()
@@ -361,7 +375,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                         with torch.amp.autocast('cuda'):
                             if args.level == 0:
                                 X0 = batch
-                                mse_loss, bce_loss, occ_loss, _, _, occ_iou = diffusion_ddp(X0)
+                                mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion_ddp(X0)
                             else:
                                 X, X_UP, X0 = batch
                                 with torch.no_grad():
@@ -369,7 +383,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                                 X0_BLUR.grid = X0.grid
                                 x0c, bc = clip_data_per_element(
                                     X0, X0_BLUR, cfg["clip_size"])
-                                mse_loss, bce_loss, occ_loss, _, _, occ_iou = diffusion_ddp(x0c, bc)
+                                mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion_ddp(x0c, bc)
 
                             loss = (mse_loss + bce_loss + occ_loss) / accumulate_steps
 
@@ -386,6 +400,16 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                         step_bce += bce_val
                         step_occ += occ_val
                         step_iou += occ_iou.item()
+
+                        n_micro += 1
+                        epoch_occ_only_mse_sum += metrics['occ_only_mse'].item()
+                        epoch_occ_only_ce_sum  += metrics['occ_only_ce'].item()
+                        b_sig = metrics['bce_per_sigma']
+                        i_sig = metrics['iou_per_sigma']
+                        valid = ~torch.isnan(b_sig)
+                        bin_bce_sum[valid] += b_sig[valid]
+                        bin_iou_sum[valid] += i_sig[valid]
+                        bin_cnt[valid]     += 1
 
 
                 if any_backward:
@@ -406,6 +430,12 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             epoch_occ_loss = epoch_occ_loss_sum / grad_steps_per_epoch
             epoch_occ_iou  = epoch_occ_iou_sum / grad_steps_per_epoch
 
+            denom = max(n_micro, 1)
+            epoch_occ_only_mse = epoch_occ_only_mse_sum / denom
+            epoch_occ_only_ce  = epoch_occ_only_ce_sum / denom
+            bin_bce = (bin_bce_sum / bin_cnt.clamp(min=1)).tolist()
+            bin_iou = (bin_iou_sum / bin_cnt.clamp(min=1)).tolist()
+
             if not math.isnan(epoch_mse_loss):
                 MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             if not math.isnan(epoch_bce_loss):
@@ -424,6 +454,20 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                      "OCC": epoch_occ_loss,
                      "Total": epoch_mse_loss + epoch_bce_loss + epoch_occ_loss,
                     }, epoch)
+                # Occupied-only geometry/class error (the aggregate MSE/CE are
+                # dominated by zero-filled empties and read near-zero regardless).
+                writer.add_scalars(
+                    "OccOnly/train",
+                    {"MSE": epoch_occ_only_mse, "CE": epoch_occ_only_ce}, epoch)
+                # Per-σ occupancy: bin 0 = cleanest (high SNR) … last = noisiest.
+                # A flat BCE/IoU that only collapses in the high-σ bins is the
+                # expected entropy floor; poor low/mid-σ bins signal a real bug.
+                writer.add_scalars(
+                    "OccBCE_per_sigma/train",
+                    {f"bin{k}": bin_bce[k] for k in range(n_bins)}, epoch)
+                writer.add_scalars(
+                    "OccIoU_per_sigma/train",
+                    {f"bin{k}": bin_iou[k] for k in range(n_bins)}, epoch)
 
             val_suffix = ""
             if is_main and val_dataset is not None and epoch % val_every == 0:
@@ -433,7 +477,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     ema.store(diffusion)
                     ema.copy_to(diffusion)
                 try:
-                    val_mse_loss, val_bce_loss, val_occ_loss, val_occ_iou = val_dataset.compute_val_loss(
+                    val_mse_loss, val_bce_loss, val_occ_loss, val_occ_iou, val_metrics = val_dataset.compute_val_loss(
                         diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                         clip_size=cfg["clip_size"], device=device,
                     )
@@ -458,6 +502,21 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                             'OccIoU',
                             {"train": epoch_occ_iou, "val": val_occ_iou.item()}, epoch
                         )
+                        val_bin_bce = val_metrics['bce_per_sigma'].tolist()
+                        val_bin_iou = val_metrics['iou_per_sigma'].tolist()
+                        writer.add_scalars(
+                            "OccOnly/val",
+                            {"MSE": val_metrics['occ_only_mse'].item(),
+                             "CE":  val_metrics['occ_only_ce'].item()}, epoch)
+                        writer.add_scalars(
+                            "OccBCE_per_sigma/val",
+                            {f"bin{k}": val_bin_bce[k] for k in range(n_bins)}, epoch)
+                        writer.add_scalars(
+                            "OccIoU_per_sigma/val",
+                            {f"bin{k}": val_bin_iou[k] for k in range(n_bins)}, epoch)
+                        val_suffix += (
+                            " | Val IoU/σ[clean→noisy]="
+                            + "/".join(f"{v:.2f}" for v in val_bin_iou))
 
                         if val_total_loss < best_val_loss:
                             best_val_loss = val_total_loss
@@ -475,10 +534,13 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                         ema.restore(diffusion)
 
             if is_main:
+                iou_str = "/".join(f"{v:.2f}" for v in bin_iou)
                 tqdm.write(
                     f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | "
                     f"BCE={epoch_bce_loss:.4f} | OCC={epoch_occ_loss:.4f} "
-                    f"| OccIoU={epoch_occ_iou:.3f}"
+                    f"| OccIoU={epoch_occ_iou:.3f} "
+                    f"| OccOnly MSE={epoch_occ_only_mse:.4f}/CE={epoch_occ_only_ce:.3f} "
+                    f"| IoU/σ[clean→noisy]={iou_str}"
                     + val_suffix)
 
     finally:
