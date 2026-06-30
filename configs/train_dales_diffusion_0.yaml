@@ -77,10 +77,14 @@ occ_label_smoothing: 0.05    # targets 0,1 → 0.05,0.95: bounds the BCE so val
 # than generating it — so at sampling it floods to occupied-everywhere (the dense
 # cube).  With prob p, zero the input mask channel for whole samples so the head
 # must infer occupancy from generated geometry/semantics/coords.
-#   1.0 → occupancy is purely a structure predictor on generated features (try this)
-#   0.0 → legacy (leak intact)
-# With this on, the per-σ val IoU becomes the *honest* from-scratch occupancy skill.
-mask_input_dropout: 1.0
+#   1.0 → occupancy is purely a structure predictor on generated features
+#   0.0 → legacy (mask channel diffused; sampler can push voxels empty)
+# FINDING: p=1.0 made sampling WORSE — occupancy floods to ~0.97 everywhere
+# (bootstrapping/exposure bias: empty voxels get plausible generated features,
+# so the geometry-only predictor calls them occupied).  The coords+grid fix had
+# already turned the dense cube into a bimodal, thresholdable field; the mask
+# channel was load-bearing for sampling-time pruning.  Reverted to 0.0.
+mask_input_dropout: 0.0
 
 # σ-weighting of the occupancy BCE (review item b).  Unweighted BCE wastes ~half
 # its gradient on the high-σ regime where x_t is pure noise and occupancy is an
