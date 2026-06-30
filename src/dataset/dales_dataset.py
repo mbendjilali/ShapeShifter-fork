@@ -58,10 +58,20 @@ class DALESDataset:
         preload: bool = True,
         level: Optional[int] = None,
         clip_size: Optional[int] = None,
+        random_crop: bool = False,
+        empty_fill: str = 'blur',
     ):
         self.upsample_fac = upsample_fac
         self.base_resolution = base_resolution
         self.clip_size = clip_size
+        # empty_fill='zero' makes empty (mask=-1) voxels neutral instead of
+        # blurred-neighbour-filled, removing the train/inference mismatch (item 3).
+        self.empty_fill = empty_fill
+        # random_crop=True: level-0 windows are centered at a random *grid* location
+        # (occupancy-agnostic), not a random occupied voxel — so borders / sparse
+        # regions are seen and training matches the full-tile inference distribution
+        # (item 3).  Clips are then re-sampled fresh each epoch (no dense cache).
+        self.random_crop = random_crop
 
         with open(manifest_path) as f:
             manifest = yaml.safe_load(f)
@@ -135,11 +145,14 @@ class DALESDataset:
                         obj = DiffusionTensor(obj.grid, obj.data)
                     self._cache[key] = DiffusionTensor(obj.grid.to("cpu"), obj.data.to("cpu"))
 
-            # Precompute on GPU, store back on CPU
-            if level == 0:
+            # Precompute on GPU, store back on CPU.
+            # In random_crop mode we intentionally do NOT freeze a dense level-0
+            # clip — clips must be re-sampled fresh each epoch — so we only keep
+            # the raw sparse tensor in self._cache (loaded above) and clip on the fly.
+            if level == 0 and not self.random_crop:
                 X0 = self.load_crop_level0(split, crop_id, device)
                 self._dense_cache[crop_id] = DiffusionTensor(X0.grid.to("cpu"), X0.data.to("cpu"))
-            elif level is not None:
+            elif level is not None and level != 0:
                 X, X_UP, Y = self.load_crop_levelN(split, crop_id, level, device)
                 self._level_cache[crop_id] = (
                     DiffusionTensor(X.grid.to("cpu"),    X.data.to("cpu")),
@@ -148,7 +161,9 @@ class DALESDataset:
                 )
 
         self._preloaded_level = level
-        if level == 0:
+        if level == 0 and self.random_crop:
+            suffix = ", level-0 random crops (clipped fresh each epoch, no dense cache)"
+        elif level == 0:
             suffix = f", {len(self._dense_cache)} dense tensors precomputed (level 0)"
         elif level is not None:
             suffix = f", {len(self._level_cache)} (X,X_UP,Y) tuples for level {level}"
@@ -180,13 +195,39 @@ class DALESDataset:
         if self.clip_size is not None:
             ijk = X0.grid.ijk.jdata
             if len(ijk) > 0:
-                ind = torch.randint(0, len(ijk), (1,), device=ijk.device)
-                center = ijk[ind]          # (1, 3)
-                lo = center - self.clip_size
-                hi = center + self.clip_size
-                cf, cg = X0.grid.clip(X0.data, lo, hi)
+                cf, cg = self._clip_window(X0, ijk)
                 X0 = DiffusionTensor(cg, cg.jagged_like(cf.jdata))
-        return X0.to_custom_dense()
+        return X0.to_custom_dense(empty_fill=self.empty_fill)
+
+    def _clip_window(self, X0: DiffusionTensor, ijk: torch.Tensor):
+        """Clip a `clip_size` half-extent window around a center.
+
+        random_crop: center is a uniform random grid location in the tile bbox
+        (occupancy-agnostic) — so the window can include borders and empty space,
+        matching the full-tile inference distribution.  Falls back to an
+        occupancy-centered window if a random one happens to be empty.
+        Otherwise: legacy behavior, center on a random occupied voxel.
+        """
+        def clip_at(center):
+            lo = center - self.clip_size
+            hi = center + self.clip_size
+            return X0.grid.clip(X0.data, lo, hi)
+
+        if not self.random_crop:
+            center = ijk[torch.randint(0, len(ijk), (1,), device=ijk.device)]
+            return clip_at(center)
+
+        lo_b = ijk.min(0).values
+        hi_b = ijk.max(0).values
+        span = (hi_b - lo_b + 1).clamp(min=1)
+        for _ in range(4):  # retry a few random centers before falling back
+            center = (lo_b + (torch.rand(3, device=ijk.device) * span).long()).view(1, 3)
+            cf, cg = clip_at(center)
+            if len(cg.ijk.jdata) > 0:
+                return cf, cg
+        # degenerate (empty window): fall back to an occupancy-centered clip
+        center = ijk[torch.randint(0, len(ijk), (1,), device=ijk.device)]
+        return clip_at(center)
 
     def load_crop_levelN(
         self, split: str, crop_id: str, level: int, device: str = "cuda"
@@ -213,6 +254,7 @@ class DALESDataset:
         level: int,
         batch_size: int,
         device: str = "cuda",
+        
     ):
         """
         Sample a genuine multi-crop batch.
@@ -232,9 +274,9 @@ class DALESDataset:
                 for c in crop_ids:
                     cached = self._dense_cache[c]
                     tensors.append(DiffusionTensor(cached.grid.to(device), cached.data.to(device)))
-                return _jcat_dt(tensors)
+                return _jcat_dt(tensors), crop_ids
             tensors = [self.load_crop_level0(split, c, device) for c in crop_ids]
-            return _jcat_dt(tensors)
+            return _jcat_dt(tensors), crop_ids
 
         # Fast path: precomputed tuples, only CPU→GPU transfer + jcat
         if level == self._preloaded_level and self._level_cache:
@@ -244,7 +286,7 @@ class DALESDataset:
                 X_list.append(DiffusionTensor(X_cpu.grid.to(device),   X_cpu.data.to(device)))
                 XUP_list.append(DiffusionTensor(XUP_cpu.grid.to(device), XUP_cpu.data.to(device)))
                 X0_list.append(DiffusionTensor(Y_cpu.grid.to(device),   Y_cpu.data.to(device)))
-            return _jcat_dt(X_list), _jcat_dt(XUP_list), _jcat_dt(X0_list)
+            return _jcat_dt(X_list), _jcat_dt(XUP_list), _jcat_dt(X0_list), crop_ids
 
         # Slow path: compute trilinear upsample on the fly
         X_list, XUP_list, X0_list = [], [], []
@@ -280,8 +322,11 @@ class DALESDataset:
         sample_ids = random.sample(self.crops, min(n_crops, len(self.crops)))
         mse_losses = []
         bce_losses = []
-        all_preds_labels = []
-        all_targets_labels = []
+        occ_losses = []
+        occ_ious = []
+        occ_only_mses = []
+        occ_only_ces = []
+        bin_bce_sum = bin_iou_sum = bin_cnt = None
         for crop_id in sample_ids:
             if level == 0:
                 if crop_id in self._dense_cache:
@@ -290,22 +335,42 @@ class DALESDataset:
                 else:
                     X0 = self.load_crop_level0(split, crop_id, device)
                 with torch.no_grad():
-                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(X0)
+                    mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion(X0)
             else:
                 X, X_UP, X0 = self.load_crop_levelN(split, crop_id, level, device)
                 with torch.no_grad():
                     X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
                     X0_BLUR.grid = X0.grid
                     x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
-                    mse_loss, bce_loss, pred_labels, target_labels = diffusion(x0c, blurc)
+                    mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion(x0c, blurc)
             mse_losses.append(mse_loss)
             bce_losses.append(bce_loss)
-            all_preds_labels.append(pred_labels)
-            all_targets_labels.append(target_labels)
-        all_preds_labels = torch.cat(all_preds_labels, dim=0)
-        all_targets_labels = torch.cat(all_targets_labels, dim=0)
+            occ_losses.append(occ_loss)
+            occ_ious.append(occ_iou)
+            occ_only_mses.append(metrics['occ_only_mse'])
+            occ_only_ces.append(metrics['occ_only_ce'])
+            # NaN-aware accumulation of the per-σ buckets across crops.
+            b_sig, i_sig = metrics['bce_per_sigma'], metrics['iou_per_sigma']
+            if bin_bce_sum is None:
+                bin_bce_sum = torch.zeros_like(b_sig)
+                bin_iou_sum = torch.zeros_like(i_sig)
+                bin_cnt     = torch.zeros_like(b_sig)
+            valid = ~torch.isnan(b_sig)
+            bin_bce_sum[valid] += b_sig[valid]
+            bin_iou_sum[valid] += i_sig[valid]
+            bin_cnt[valid]     += 1
 
-        return sum(mse_losses) / len(mse_losses), sum(bce_losses) / len(bce_losses)
+        val_metrics = {
+            'occ_only_mse': sum(occ_only_mses) / len(occ_only_mses),
+            'occ_only_ce':  sum(occ_only_ces) / len(occ_only_ces),
+            'bce_per_sigma': bin_bce_sum / bin_cnt.clamp(min=1),
+            'iou_per_sigma': bin_iou_sum / bin_cnt.clamp(min=1),
+        }
+        return (sum(mse_losses) / len(mse_losses),
+                sum(bce_losses) / len(bce_losses),
+                sum(occ_losses) / len(occ_losses),
+                sum(occ_ious) / len(occ_ious),
+                val_metrics)
 
     # ------------------------------------------------------------------
     # Debug / stats

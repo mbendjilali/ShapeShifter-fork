@@ -116,8 +116,18 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         local_offset = (global_offset - voxel_centers.jdata) / self.grid.voxel_sizes.max()
         return DiffusionTensor.get_tensor_from_data(self.grid, local_offset, features, mask)
 
-    def to_custom_dense(self, blur_kernel=9):
-        '''Last coordinate (mask) set to -1'''
+    def to_custom_dense(self, blur_kernel=9, empty_fill='blur'):
+        '''Densify the grid bbox; empty voxels get mask = -1.
+
+        empty_fill controls the *clean* features of empty voxels:
+          'blur' — legacy: smoothed neighbour features.  These carry structured
+                   signal the reverse process cannot reproduce from pure noise,
+                   so they mismatch inference (where empties start from randn).
+          'zero' — neutral: empties keep their zero features, so q_sample turns
+                   them into pure noise at every t — matching the inference path
+                   (randn → denoise → prune by mask).  Fixes the train/test
+                   mismatch on the voxels whose mask decides structure.
+        '''
         dense_x = self.to_dense()
         mask = (dense_x[..., -1]) == 0
         dense_x_flat = dense_x.view(-1, dense_x.shape[-1])
@@ -127,10 +137,13 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         vdb_tensor = fvdb.nn.vdbtensor_from_dense(
             dense_x, ijk_min=ijk_min, origins=self.grid.origins, voxel_sizes=self.grid.voxel_sizes)
 
-        to_change = vdb_tensor.jdata[..., -1] < 0
-        blur_x = blur_tensor(vdb_tensor, blur_kernel=blur_kernel)
-        blur_x.data.jdata[..., -1] = -1
-        vdb_tensor.data.jdata[to_change] = blur_x.data.jdata[to_change]
+        if empty_fill == 'blur':
+            to_change = vdb_tensor.jdata[..., -1] < 0
+            blur_x = blur_tensor(vdb_tensor, blur_kernel=blur_kernel)
+            blur_x.data.jdata[..., -1] = -1
+            vdb_tensor.data.jdata[to_change] = blur_x.data.jdata[to_change]
+        elif empty_fill != 'zero':
+            raise ValueError(f"invalid empty_fill {empty_fill!r}")
         return DiffusionTensor.from_vdb(vdb_tensor)
 
     def to_batch(self, batch_size=1):

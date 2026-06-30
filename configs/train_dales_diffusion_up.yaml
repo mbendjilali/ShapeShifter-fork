@@ -19,7 +19,7 @@ class_weight: [0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
 
 
 lr: 0.0001
-batch_size: 4
+batch_size: 1
 clip_size: 20
 
 dropout: 0.05

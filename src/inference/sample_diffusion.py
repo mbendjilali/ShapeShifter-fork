@@ -21,49 +21,42 @@ def compute_base_grid(model_name, eval_batch_size, base_res=16, src_path="./data
 
 
 def compute_canonical_base_grid(
-    base_res: int = 16,
-    extent_m: float = 50.0,
+    nx: int = 64,
+    nz: int = 36,
+    voxel_size: float = 0.8,
     batch: int = 1,
     device: str = "cuda",
-    nz: int = None,
 ):
     """
     DALES unconditional sampling: a fully-occupied dense base grid.
 
-    At level 0 for 100×100m crops (base_res=16, voxel_size=6.25m):
-      - XY: 16 × 16 voxels (100m)
-      - Z:  nz voxels (default: ceil(50m / voxel_size) = ceil(50/6.25) = 8)
+    This MUST match the training-window geometry, or the denoiser is queried
+    off-distribution (the previous version used voxel_size=1.5625m and nz=8 —
+    both wrong — which produced the stacked flat sheets).  Encoded crops use
+    voxel_size=0.8m, ~64 voxels in XY (a clipped window) and ~36 voxels of
+    vertical extent (≈ ground→28m).  The world-Z origin is voxel_size/2, exactly
+    as in encoding, so the height feature (grid_coord_features) reads identically
+    here and in training: the bottom layer is ground (height 0).
 
-    All voxels start active (mask=+1); the diffusion model prunes via the mask
-    channel during sampling.
+    All voxels start active (mask=+1); the model prunes via the mask channel.
 
     Parameters
     ----------
-    base_res : int
-        Number of voxels in X and Y (default 16).
-    extent_m : float
-        Physical XY extent of one crop in metres (default 100.0 for DALES crops).
-    batch : int
-        Batch size (number of independent samples).
+    nx : int        Number of voxels in X and Y (footprint), default 64.
+    nz : int        Number of voxels in Z (vertical extent), default 36.
+    voxel_size : float  Metres per voxel — must equal the encoding value (0.8).
+    batch : int     Number of independent samples.
     device : str
-    nz : int | None
-        Number of voxels in Z. Defaults to base_res (isotropic grid).
-        Pass 8 for 100×100m DALES crops (covers 0..50m above ground at 6.25m/voxel).
 
     Returns
     -------
-    fvdb.GridBatch — a dense base_res × base_res × nz grid (all voxels active).
+    fvdb.GridBatch — a dense nx × nx × nz grid (all voxels active).
     """
     import fvdb
-    import math
 
-    voxel_size = extent_m / base_res
-    if nz is None:
-        # isotropic cube by default; caller can override for non-square shapes
-        nz = base_res
     vox_origin = torch.tensor([voxel_size / 2.0] * 3, dtype=torch.float32, device=device)
 
-    ix = torch.arange(base_res, device=device)
+    ix = torch.arange(nx, device=device)
     iz = torch.arange(nz, device=device)
     gi, gj, gk = torch.meshgrid(ix, ix, iz, indexing="ij")
     ijk = torch.stack([gi.flatten(), gj.flatten(), gk.flatten()], dim=-1).to(torch.int32)
@@ -76,12 +69,12 @@ def load_dales_diffusion(level, src):
     """Load a DALES checkpoint: {src}/dales_{level}_*.pt (picks most recent)."""
     import utils.fvdb_diffusion as _fvdb_diffusion
     import utils.model as _model
-    from utils.model import DiffusionCNN
+    from utils.model import DiffusionCNN, DiffusionUNet
     from utils.fvdb_diffusion import SparseDiffusion
     # Checkpoints were pickled under old top-level names; remap so unpickling works.
     sys.modules.setdefault('fvdb_diffusion', _fvdb_diffusion)
     sys.modules.setdefault('model', _model)
-    models = glob.glob('{}/dales_{}*_best.pt'.format(src, level))
+    models = glob.glob('{}/dales_{}*.pt'.format(src, level))
     if not models:
         raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
     models.sort(reverse=True)
@@ -92,19 +85,47 @@ def load_dales_diffusion(level, src):
     # Best-epoch dict format: reconstruct SparseDiffusion from config + state dict.
     cfg = ckpt["config"]
     state_dict = ckpt["model_state_dict"]
-    # Infer in_channels from first conv weight shape: [C_out, in_channels+time_emb, ...]
-    first_w = next(iter(state_dict.values()))
-    in_channels = first_w.shape[1] - cfg["time_emb"]
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = DiffusionCNN(
-        channels=cfg["features"],
-        layers=cfg["layers"],
-        time_emb=cfg["time_emb"],
-        one_layers=cfg["one_layers"],
-        first_ks=cfg["first_ks"],
-        in_channels=in_channels,
-        out_channels=in_channels,
-    ).to(device)
+    from utils.model import _COORD_DIMS
+    coord_features = cfg.get("coord_features", "none")
+    coord_h_ref = cfg.get("coord_h_ref", 30.0)
+    coord_xy_ref = cfg.get("coord_xy_ref", 51.0)
+    n_coord = _COORD_DIMS[coord_features]
+    unet_depth = cfg.get("unet_depth", 0)
+    if unet_depth > 0:
+        # FiLM U-Net: time is conditioned, not concatenated; the stem conv's
+        # in_channels = data channels + coordinate channels, so subtract coords.
+        in_channels = state_dict["input_conv.0.weight"].shape[1] - n_coord
+        model = DiffusionUNet(
+            channels=cfg["features"],
+            unet_depth=unet_depth,
+            time_emb=cfg["time_emb"],
+            one_layers=cfg["one_layers"],
+            first_ks=cfg["first_ks"],
+            in_channels=in_channels,
+            out_channels=in_channels,
+            dropout=cfg.get("dropout", 0.01),
+            coord_features=coord_features,
+            coord_h_ref=coord_h_ref,
+            coord_xy_ref=coord_xy_ref,
+        ).to(device)
+    else:
+        # Legacy DiffusionCNN: time AND coords are concatenated at the stem.
+        # [C_out, in_channels + time_emb + n_coord, k, k, k]
+        first_w = next(iter(state_dict.values()))
+        in_channels = first_w.shape[1] - cfg["time_emb"] - n_coord
+        model = DiffusionCNN(
+            channels=cfg["features"],
+            layers=cfg["layers"],
+            time_emb=cfg["time_emb"],
+            one_layers=cfg["one_layers"],
+            first_ks=cfg["first_ks"],
+            in_channels=in_channels,
+            out_channels=in_channels,
+            coord_features=coord_features,
+            coord_h_ref=coord_h_ref,
+            coord_xy_ref=coord_xy_ref,
+        ).to(device)
     model.load_state_dict(state_dict)
     model_upsampler = None
     if level > 0:
@@ -118,6 +139,7 @@ def load_dales_diffusion(level, src):
         max_T=cfg.get("max_T", None) if level > 0 else None,
         n_classes=cfg["n_classes"],
         model_upsampler=model_upsampler,
+        occupancy_objective=cfg.get("occupancy_objective", "mse"),
     ).to(device)
     diffusion.eval()
     return diffusion
@@ -125,15 +147,16 @@ def load_dales_diffusion(level, src):
 
 def compute_all_generations_dales(
     src,
-    base_res=16,
-    extent_m=100.0,
+    nx=64,
+    voxel_size=0.8,
     max_level=4,
     eval_batch_size=5,
-    features=12,
+    features=13,
     ddim_steps=None,
     verbose=False,
-    nz=8,
+    nz=36,
     target_class=None,
+    occ_threshold=0.0,
 ):
     """
     Unconditional DALES generation: noise → level 0 → … → level max_level.
@@ -151,7 +174,8 @@ def compute_all_generations_dales(
     diffusion0 = load_dales_diffusion(0, src)
     diffusion0.eval()
 
-    X0G = compute_canonical_base_grid(base_res, extent_m, eval_batch_size, device, nz=nz)
+    X0G = compute_canonical_base_grid(
+        nx=nx, nz=nz, voxel_size=voxel_size, batch=eval_batch_size, device=device)
     t0 = time.time()
 
     noisy_init = grid_to_VDB(X0G, torch.randn, [features])
@@ -163,7 +187,7 @@ def compute_all_generations_dales(
         generated_X = diffusion0.ddim_sample(
             noisy_init, steps=diffusion0.max_T // ddim_steps)
 
-    generated_X = DiffusionTensor.from_vdb(generated_X).remove_mask()
+    generated_X = DiffusionTensor.from_vdb(generated_X).remove_mask(threshold=occ_threshold)
     del diffusion0
     torch.cuda.empty_cache()
     generated_Xs = [generated_X]
@@ -172,7 +196,8 @@ def compute_all_generations_dales(
 
     for i in range(1, max_level + 1):
         generated_X = generate_level_dales(generated_X, i, src, ddim_steps, verbose,
-                                           target_class=target_class)
+                                           target_class=target_class,
+                                           occ_threshold=occ_threshold)
         # move previous level off GPU before accumulating the new one
         generated_Xs[-1] = generated_Xs[-1].cpu()
         generated_Xs.append(generated_X)
@@ -181,7 +206,7 @@ def compute_all_generations_dales(
 
 
 def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False,
-                         target_class=None):
+                         target_class=None, occ_threshold=0.0):
     """Run one DALES upsampler level."""
     diffusion = load_dales_diffusion(level, src)
     diffusion.eval()
@@ -195,7 +220,7 @@ def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False
         generated_X = diffusion.ddim_sample(new_XT, steps=diffusion.max_T // ddim_steps)
     if verbose:
         print('LEVEL {}: {:.1f}s'.format(level, time.time() - t0))
-    result = DiffusionTensor.from_vdb(generated_X).remove_mask()
+    result = DiffusionTensor.from_vdb(generated_X).remove_mask(threshold=occ_threshold)
     del diffusion
     torch.cuda.empty_cache()
     return result
@@ -277,6 +302,71 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
         export_to_laz(positions_np, intensity, class_idx, save_path=laz_path)
 
 
+def diagnose_occupancy_dales(
+    src, out_dir, nx=64, voxel_size=0.8, nz=36, eval_batch_size=1, features=13,
+    ddim_steps=None, thresholds=(-0.5, 0.0, 0.3, 0.6, 0.85),
+):
+    """Read-only occupancy diagnostic for the level-0 model (review #1).
+
+    Samples the level-0 denoiser once, then — *before* pruning — reports the
+    distribution of the predicted occupancy over the canonical grid and a
+    threshold sweep.  The saved/decoded mask channel is 2σ(logit)-1 ∈ (-1,1),
+    so occ_prob = σ(logit) = (mask+1)/2.
+
+    Reading the result:
+      * occ_prob piled up near 1 (logit ≫ 0) everywhere → the field floods to
+        occupied (the dense cube); a leak/bias problem, not calibration.
+      * occ_prob spread with spatial structure but the kept-fraction at
+        threshold 0 is too high → mostly a calibration problem; pick a higher
+        -occ_threshold.
+      * occ_prob ≈ 0.5 / featureless at every threshold → the model isn't
+        generating structure (needs the mask-input-dropout retrain, #2).
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    os.makedirs(out_dir, exist_ok=True)
+    diffusion0 = load_dales_diffusion(0, src)
+    diffusion0.eval()
+
+    X0G = compute_canonical_base_grid(
+        nx=nx, nz=nz, voxel_size=voxel_size, batch=eval_batch_size, device=device)
+    noisy_init = grid_to_VDB(X0G, torch.randn, [features])
+    with torch.no_grad():
+        if ddim_steps is None:
+            gen = diffusion0.ddpm_sample(noisy_init)
+        else:
+            gen = diffusion0.ddim_sample(noisy_init, steps=diffusion0.max_T // ddim_steps)
+
+    raw = DiffusionTensor.from_vdb(gen)
+    mask_val = raw.jdata[:, -1].detach().float().cpu()
+    occ_prob = ((mask_val + 1.0) / 2.0).clamp(0, 1)
+    logit = torch.log(occ_prob.clamp(1e-6, 1 - 1e-6) / (1 - occ_prob).clamp(1e-6, 1 - 1e-6))
+
+    print(f"\n=== occupancy diagnostic ({mask_val.numel()} voxels over "
+          f"{eval_batch_size}×{nx}×{nx}×{nz}) ===")
+    print(f"occ_prob: mean={occ_prob.mean():.3f}  median={occ_prob.median():.3f}  "
+          f"min={occ_prob.min():.3f}  max={occ_prob.max():.3f}")
+    print(f"logit:    mean={logit.mean():.2f}  std={logit.std():.2f}  "
+          f"min={logit.min():.2f}  max={logit.max():.2f}")
+    import numpy as np
+    hist, _ = np.histogram(occ_prob.numpy(), bins=10, range=(0, 1))
+    tot = max(int(hist.sum()), 1)
+    print("occ_prob histogram (prob bin → %voxels):")
+    for b in range(10):
+        bar = '#' * int(50 * hist[b] / tot)
+        print(f"  [{b/10:.1f},{(b+1)/10:.1f})  {100*hist[b]/tot:5.1f}%  {bar}")
+
+    print("threshold sweep (mask-value space, occ kept = mask>t):")
+    for t in thresholds:
+        frac = float((mask_val > t).float().mean())
+        pruned = raw.remove_mask(threshold=t)
+        n_kept = int(pruned.jdata.shape[0])
+        print(f"  t={t:+.2f}  kept={100*frac:5.1f}%  ({n_kept} voxels)  → saving")
+        save_dales_pc(pruned, out_dir, level=f"thr{t:+.2f}")
+    print(f"=== saved threshold-swept LAZs to {out_dir} ===\n")
+    del diffusion0
+    torch.cuda.empty_cache()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DALES / ShapeShifter inference')
     parser.add_argument('-dataset', default=None, type=str,
@@ -293,11 +383,18 @@ if __name__ == '__main__':
                         help='Crops generated per forward pass')
     parser.add_argument('-total_num', default=20, type=int,
                         help='Total number of crops to generate')
-    parser.add_argument('-base_res', default=64, type=int)
-    parser.add_argument('-nz', default=8, type=int,
-                        help='Z voxels at level 0 (DALES 100m crops: 8 → covers 0..50m at 6.25m/vox)')
+    parser.add_argument('-base_res', default=64, type=int,
+                        help='XY voxels of the level-0 canonical grid (footprint), matching training clips')
+    parser.add_argument('-voxel_size', default=0.8, type=float,
+                        help='Metres per voxel at level 0 — MUST match encoding (0.8)')
+    parser.add_argument('-nz', default=36, type=int,
+                        help='Z voxels at level 0 (0.8m/vox → 36 ≈ ground..28m, matching DALES crops)')
     parser.add_argument('-class', dest='target_class', default=None, type=int,
                         help='Clamp class channels to this label during sampling (0-7, repaint-style)')
+    parser.add_argument('-occ_threshold', default=0.0, type=float,
+                        help='remove_mask threshold in mask-value space (-1..1); raise to prune more')
+    parser.add_argument('-diagnose', action='store_true',
+                        help='Run the read-only occupancy diagnostic (histogram + threshold sweep) and exit')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -309,6 +406,13 @@ if __name__ == '__main__':
     if args.dataset == 'dales':
         OUT = args.out or 'output/dales'
         os.makedirs(OUT, exist_ok=True)
+
+        if args.diagnose:
+            diagnose_occupancy_dales(
+                src=SRC, out_dir=OUT, nx=args.base_res, voxel_size=args.voxel_size,
+                nz=args.nz, eval_batch_size=1, ddim_steps=args.ddim_steps)
+            sys.exit(0)
+
         n_batches = max(1, args.total_num // args.batch_size)
         print(f'Generating {n_batches * args.batch_size} DALES crops '
               f'({n_batches} batches of {args.batch_size}) → {OUT}')
@@ -319,13 +423,15 @@ if __name__ == '__main__':
             with torch.no_grad():
                 GX = compute_all_generations_dales(
                     src=SRC,
-                    base_res=args.base_res,
+                    nx=args.base_res,
+                    voxel_size=args.voxel_size,
                     max_level=args.levels,
                     eval_batch_size=args.batch_size,
                     ddim_steps=args.ddim_steps,
                     nz=args.nz,
                     verbose=True,
                     target_class=args.target_class,
+                    occ_threshold=args.occ_threshold,
                 )
             print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving LAZs …')
             for level_i, g in enumerate(GX):

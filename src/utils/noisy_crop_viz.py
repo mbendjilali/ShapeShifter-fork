@@ -3,7 +3,7 @@ import laspy
 import numpy as np
 import torch
 
-from diffusion_tensor import DiffusionTensor
+from utils.diffusion_tensor import DiffusionTensor
 
 def export_las(dt, outfile):
     """
@@ -43,6 +43,7 @@ def save_training_crop_snapshot(
     diffusion,
     out_dir,
     tag,
+    crop_name
 ):
 
     os.makedirs(out_dir, exist_ok=True)
@@ -63,7 +64,24 @@ def save_training_crop_snapshot(
             print(f" [Warn] {name} crop is None, skipping snapshot")
             continue
         dt = DiffusionTensor(crop.grid, crop.data)
-        outfile = os.path.join(out_dir, f"{tag}_{name}_{times}.las")
+
+        for i in range(dt.grid.grid_count):
+
+            grid = dt.grid[i]
+            data = dt.data[i]
+
+            single_dt = DiffusionTensor(grid, data)
+
+            outfile = os.path.join(
+                out_dir,
+                f"{crop_name}_{tag}_{name}_{i}.las"
+            )
+
+            export_las(single_dt, outfile)
+
+        print(dt.grid.grid_count)
+        
+        outfile = os.path.join(out_dir, f"{crop_name}_{tag}_{name}.las")
         export_las(dt, outfile)
 
 

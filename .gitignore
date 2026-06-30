@@ -175,3 +175,6 @@ data_no_veg
 *.zip
 *.ckpt
 *.mtl
+
+data_no_veg/
+context/
