@@ -295,7 +295,6 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
         positions_np = positions.cpu().numpy()
         features_np    = features.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
         intensity    = features_np[:, 1]
-        print(intensity)
         class_idx    = features_np[:, 1:].argmax(axis=-1)
 
         laz_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.laz')
@@ -381,7 +380,7 @@ if __name__ == '__main__':
                         help='DDIM steps (None → full DDPM)')
     parser.add_argument('-batch_size', default=4, type=int,
                         help='Crops generated per forward pass')
-    parser.add_argument('-total_num', default=20, type=int,
+    parser.add_argument('-total_num', default=1, type=int,
                         help='Total number of crops to generate')
     parser.add_argument('-base_res', default=64, type=int,
                         help='XY voxels of the level-0 canonical grid (footprint), matching training clips')

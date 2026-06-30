@@ -1,103 +1,78 @@
-# DALES — niveau 0 (base 16^3 dense)
+# DALES — COARSE LAYOUT level (3.2m voxels, ~32×32×7 per 100m crop).
+#
+# Coarse-first generation: at this resolution the whole scene fits in a handful
+# of voxels, so a full scene is ONE training sample (no clipping).  The U-Net's
+# receptive field then spans the whole layout, so it learns p(scene-layout)
+# instead of the translation-invariant per-column marginal that 0.8m/64³-clip
+# training collapsed to.  Validate spatial layout diversity HERE before building
+# the 16→32→64 upsamplers that refine it.
+#
+# Requires the 16.pt level on disk: re-encode with configs/encoding/dales.yaml
+# (targets now include 16) so each crop has a 16.pt next to its 64.pt.
 dataset: dales
 manifest_path: configs/dales_manifest.yaml
 src_path: data/dales
 
 upsample_fac: 2
-base_resolution: 64
+base_resolution: 16        # loads 16.pt (3.2m) as the diffusion level-0 grid
 
 unet_depth: 2
 layers: 3
 first_ks: 3
 one_layers: 6
 features: 128
-epochs: 50
+epochs: 100                 # coarse scenes are cheap; train longer on the small set
 
 n_classes: 8
 class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
 
-
 lr: 0.0001
-batch_size: 4          # per-GPU micro-batch; effective = batch_size × accumulate_steps
-accumulate_steps: 2    # gradient accumulation steps; effective per-GPU batch = 8
-# Level-0 training windows (advice.md item 3).
-#   random_crop: true → windows centered at a random grid location (occupancy-
-#     agnostic), re-clipped fresh each epoch, so training matches the full-tile
-#     inference distribution instead of always centering on occupancy.
-#   clip_size is the half-extent: window edge = 2*clip_size voxels.  The res-64
-#     tiles span ~125³, so clip_size≈63 ≈ the full tile.  Larger = more layout
-#     context but more memory; lower batch_size/raise accumulate_steps if OOM.
-random_crop: true
-clip_size: 32
-# Clean features of empty (mask=-1) voxels (advice.md item 3):
-#   zero → neutral (q_sample → pure noise, matches randn-start inference)
-#   blur → legacy smoothed-neighbour fill (train/inference mismatch)
+batch_size: 8              # coarse dense scenes are tiny (~7k voxels) → larger batch
+accumulate_steps: 1
+
+# FULL-SCENE training — the whole point of coarse-first.  No clipping: every
+# sample is a complete 100m layout, so the model sees global structure.
+random_crop: false
+clip_size: null
 empty_fill: zero
 
 dropout: 0.05
-time_emb: 128          # Gaussian-Fourier time-embedding dim (FiLM conditioning)
-ema_decay: 0.999       # weight-EMA decay used for validation + saved checkpoints
+time_emb: 128
+ema_decay: 0.999
 
-# Absolute-position input channels (review item 1: the "8 sheets" fix).
-# SparseConv3d is translation-equivariant → the net cannot tell ground from sky.
-# Inject height-above-ground as an input channel (CoordConv).  Derived from the
-# grid at every call, so train and inference are identical.  coord_h_ref/xy_ref
-# are physical normalizers in metres (voxel_size=0.8, footprint 64*0.8≈51m,
-# scenes ≈0..28m tall).  Keep inference grid consistent: voxel_size 0.8, nz≈36.
-#   coord_features: z   → height only (recommended; keeps XY translation-invariance)
-#   coord_features: xyz → also per-sample-anchored x,y
-#   coord_features: none→ legacy (no absolute position)
-coord_features: xyz
+# Height-above-ground coordinate channel (lets the net tell ground from sky).
+# z only: XY position within an arbitrary 100m crop carries no canonical layout,
+# so keep horizontal translation-invariance and let the diffusion noise + learned
+# layout prior place structure.  coord_h_ref: scenes are ≈0..28m tall.
+coord_features: z
 coord_h_ref: 30.0
-coord_xy_ref: 51.0
+coord_xy_ref: 100.0
 
-# Noise-level loss weighting on the geometry MSE (advice.md item 7).
-#   loss_weighting: p2       → P2-true on the x0 head: SNR·(p2_k+SNR)^(−p2_gamma)
-#   loss_weighting: min_snr  → Min-SNR-γ: min(SNR, min_snr_gamma)  [for A/B]
-#   loss_weighting: ~        → unweighted x0-MSE
 loss_weighting: p2
 p2_k: 1.0
 p2_gamma: 1.0
 min_snr_gamma: 5.0
 
-# Occupancy (mask) objective (advice.md item 1 — "the crux").
-#   occupancy_objective: bce  → Bernoulli occupancy: channel -1 is a logit,
-#       BCE-with-logits + pos_weight (capped at occ_pos_weight_max) for imbalance,
-#       decoded to 2σ-1 at sampling.  occ_loss_weight scales the term in the total.
-#   occupancy_objective: mse  → legacy: mask denoised inside the Gaussian geom MSE.
-occupancy_objective: bce
-occ_pos_weight_max: 8.0       # cap on pos_weight=#empty/#occ (was 50; 50 fires on
-                             # sparse windows and pushes over-confident-occupied)
+# Occupancy via the VOID class (the sampling-flood fix).  Occupancy is folded into
+# the semantic categorical: [8 real classes + 1 'void'] form one softmax, so the
+# empty state (void) is reproducible at sampling — the legacy 'bce' decode forced
+# class-sum→1 on every voxel and erased the empty cue, flooding to ~97% occupied.
+# Occupancy = 1 − P(void); remove_mask keeps P(void) < 0.5 (tune via -occ_threshold).
+# void_weight scales the (majority) void category in the 9-way CE: lower → keep
+# capacity on real classes, higher → prune harder.
+occupancy_objective: void
+void_weight: .5
+# (unused in 'void' mode, kept for A/B against occupancy_objective: bce)
+occ_pos_weight_max: 8.0
 occ_loss_weight: 1.0
-occ_label_smoothing: 0.05    # targets 0,1 → 0.05,0.95: bounds the BCE so val
-                             # occupancy can't explode from over-confidence
-
-# Mask-input dropout (the leak fix).  The per-σ IoU curve showed the occupancy
-# head was copying the noised mask from its own input (IoU 0.99 at low σ) rather
-# than generating it — so at sampling it floods to occupied-everywhere (the dense
-# cube).  With prob p, zero the input mask channel for whole samples so the head
-# must infer occupancy from generated geometry/semantics/coords.
-#   1.0 → occupancy is purely a structure predictor on generated features
-#   0.0 → legacy (mask channel diffused; sampler can push voxels empty)
-# FINDING: p=1.0 made sampling WORSE — occupancy floods to ~0.97 everywhere
-# (bootstrapping/exposure bias: empty voxels get plausible generated features,
-# so the geometry-only predictor calls them occupied).  The coords+grid fix had
-# already turned the dense cube into a bimodal, thresholdable field; the mask
-# channel was load-bearing for sampling-time pruning.  Reverted to 0.0.
+occ_label_smoothing: 0.05
 mask_input_dropout: 0.0
 
-# σ-weighting of the occupancy BCE (review item b).  Unweighted BCE wastes ~half
-# its gradient on the high-σ regime where x_t is pure noise and occupancy is an
-# irreducible entropy floor.  Reallocate it toward the mid/low-σ band where
-# structure is recoverable.  Start with min_snr; A/B against ~ and clip_high_sigma.
-#   occ_loss_weighting: min_snr         → w = min(SNR, occ_min_snr_gamma)
-#   occ_loss_weighting: snr             → w = SNR (aggressive low-σ)
-#   occ_loss_weighting: clip_high_sigma → w = 1[log_snr ≥ occ_logsnr_min]
-#   occ_loss_weighting: ~               → uniform (legacy)
 occ_loss_weighting: min_snr
 occ_min_snr_gamma: 5.0
-occ_logsnr_min: -2.0         # only used by clip_high_sigma
-per_sigma_bins: 5            # # of noise-level buckets for the per-σ diagnostics
+occ_logsnr_min: -2.0
+per_sigma_bins: 5
+
 diffusion_timesteps: 1000
 save_every: 10
 val_every: 2

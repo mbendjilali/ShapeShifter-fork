@@ -463,14 +463,9 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
             else:
                 class_loss = per_voxel_cat_ce.mean()
             pred_occ = cat_logits.argmax(dim=1) != n_cls   # occupied = not the void category
-            per_voxel_occ_bce = per_voxel_cat_ce           # for the per-σ diagnostic
-            # OCC is folded into the categorical CE above (no separate gradient).
-            # Report a diagnostic binary occupancy BCE so the OCC column is legible
-            # — computed under no_grad, so it is NOT in the backward / double-counted.
-            with torch.no_grad():
-                p_void = torch.softmax(cat_logits, dim=1)[:, n_cls]
-                p_occ  = (1.0 - p_void).clamp(1e-6, 1.0 - 1e-6)
-                occ_loss = F.binary_cross_entropy(p_occ, occ_target_hard.float())
+            per_voxel_occ_bce = per_voxel_cat_ce           # per-σ diagnostic (CE, not BCE)
+            # Occupancy is trained via class_loss; no separate occ_loss term.
+            occ_loss = class_loss.new_zeros(())
         else:
             # --- Occupancy BCE (Bernoulli structure prior) — imbalance-handled ---
             # Channel -1 is a logit; pos_weight = #empty/#occupied up-weights the

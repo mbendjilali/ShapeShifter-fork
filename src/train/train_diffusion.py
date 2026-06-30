@@ -326,6 +326,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         print(f"  {grad_steps_per_epoch} grad-steps/epoch — "
               f"{n_epochs} epochs ({n_epochs * grad_steps_per_epoch} total)")
 
+    occ_objective = cfg.get("occupancy_objective", "mse")
+    log_occ_loss = occ_objective != "void"  # void folds occupancy into BCE/CE
+
     MSE_L, BCE_L, OCC_L, VAL_MSE_L, VAL_BCE_L = [], [], [], [], []
     MSE_LOSS_EMA = None
     BCE_LOSS_EMA = None
@@ -393,7 +396,9 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                                     X0, X0_BLUR, cfg["clip_size"])
                                 mse_loss, bce_loss, occ_loss, _, _, occ_iou, metrics = diffusion_ddp(x0c, bc)
 
-                            loss = (mse_loss + bce_loss + occ_loss) / accumulate_steps
+                            loss = (mse_loss + bce_loss) / accumulate_steps
+                            if log_occ_loss:
+                                loss = loss + occ_loss / accumulate_steps
 
                         if torch.isnan(loss) or torch.isinf(loss):
                             continue
@@ -403,10 +408,12 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     mse_val = mse_loss.item()
                     bce_val = bce_loss.item()
                     occ_val = occ_loss.item()
-                    if not (math.isnan(mse_val) or math.isnan(bce_val) or math.isnan(occ_val)):
+                    if not (math.isnan(mse_val) or math.isnan(bce_val)
+                            or (log_occ_loss and math.isnan(occ_val))):
                         step_mse += mse_val
                         step_bce += bce_val
-                        step_occ += occ_val
+                        if log_occ_loss:
+                            step_occ += occ_val
                         step_iou += occ_iou.item()
 
                         n_micro += 1
@@ -430,12 +437,14 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
                 epoch_mse_loss_sum += step_mse / accumulate_steps
                 epoch_bce_loss_sum += step_bce / accumulate_steps
-                epoch_occ_loss_sum += step_occ / accumulate_steps
+                if log_occ_loss:
+                    epoch_occ_loss_sum += step_occ / accumulate_steps
                 epoch_occ_iou_sum += step_iou / accumulate_steps
 
             epoch_mse_loss = epoch_mse_loss_sum / grad_steps_per_epoch
             epoch_bce_loss = epoch_bce_loss_sum / grad_steps_per_epoch
-            epoch_occ_loss = epoch_occ_loss_sum / grad_steps_per_epoch
+            epoch_occ_loss = (epoch_occ_loss_sum / grad_steps_per_epoch
+                              if log_occ_loss else 0.0)
             epoch_occ_iou  = epoch_occ_iou_sum / grad_steps_per_epoch
 
             denom = max(n_micro, 1)
@@ -448,20 +457,21 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                 MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
             if not math.isnan(epoch_bce_loss):
                 BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
-            if not math.isnan(epoch_occ_loss):
+            if log_occ_loss and not math.isnan(epoch_occ_loss):
                 OCC_LOSS_EMA = epoch_occ_loss if OCC_LOSS_EMA is None else 0.99 * OCC_LOSS_EMA + 0.01 * epoch_occ_loss
             MSE_L.append(MSE_LOSS_EMA)
             BCE_L.append(BCE_LOSS_EMA)
-            OCC_L.append(OCC_LOSS_EMA)
+            if log_occ_loss:
+                OCC_L.append(OCC_LOSS_EMA)
 
             if is_main:
-                writer.add_scalars(
-                    "Loss/train",
-                    {"MSE": epoch_mse_loss,
-                     "BCE": epoch_bce_loss,
-                     "OCC": epoch_occ_loss,
-                     "Total": epoch_mse_loss + epoch_bce_loss + epoch_occ_loss,
-                    }, epoch)
+                train_losses = {"MSE": epoch_mse_loss,
+                                "BCE": epoch_bce_loss,
+                                "Total": epoch_mse_loss + epoch_bce_loss}
+                if log_occ_loss:
+                    train_losses["OCC"] = epoch_occ_loss
+                    train_losses["Total"] += epoch_occ_loss
+                writer.add_scalars("Loss/train", train_losses, epoch)
                 # Occupied-only geometry/class error (the aggregate MSE/CE are
                 # dominated by zero-filled empties and read near-zero regardless).
                 writer.add_scalars(
@@ -489,23 +499,23 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                         diffusion, "test", args.level, n_crops=cfg.get("val_crops", 16),
                         clip_size=cfg["clip_size"], device=device,
                     )
-                    val_total_loss = (val_mse_loss.item() + val_bce_loss.item()
-                                      + val_occ_loss.item())
+                    val_total_loss = val_mse_loss.item() + val_bce_loss.item()
+                    if log_occ_loss:
+                        val_total_loss += val_occ_loss.item()
                     if val_mse_loss is not None and val_bce_loss is not None:
                         VAL_MSE_L.append((epoch, val_mse_loss.item()))
                         val_suffix += f", Val MSE={val_mse_loss:.4f}"
                         VAL_BCE_L.append((epoch, val_bce_loss.item()))
                         val_suffix += f" + Val BCE={val_bce_loss:.4f}"
-                        val_suffix += f" + Val OCC={val_occ_loss:.4f}"
+                        if log_occ_loss:
+                            val_suffix += f" + Val OCC={val_occ_loss:.4f}"
                         val_suffix += f" + Val OccIoU={val_occ_iou:.3f}"
-                        writer.add_scalars(
-                            'Loss/Val',
-                            {"Val_MSE": val_mse_loss.item(),
-                             "Val_BCE": val_bce_loss.item(),
-                             "Val_OCC": val_occ_loss.item(),
-                             "Val_Total": val_total_loss,
-                            }, epoch
-                        )
+                        val_losses = {"Val_MSE": val_mse_loss.item(),
+                                      "Val_BCE": val_bce_loss.item(),
+                                      "Val_Total": val_total_loss}
+                        if log_occ_loss:
+                            val_losses["Val_OCC"] = val_occ_loss.item()
+                        writer.add_scalars('Loss/Val', val_losses, epoch)
                         writer.add_scalars(
                             'OccIoU',
                             {"train": epoch_occ_iou, "val": val_occ_iou.item()}, epoch
@@ -531,11 +541,11 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                             best_epoch = epoch
                             best_ckpt = f"checkpoints/diffusion_models/dales_{args.level}_{current_time}_best.pt"
                             torch.save(diffusion, best_ckpt)
+                            best_parts = (f"MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f}"
+                                          + (f", OCC: {val_occ_loss:.4f}" if log_occ_loss else ""))
                             tqdm.write(
                                 f"New best model saved at epoch {epoch}: {best_ckpt} — "
-                                f"Val loss: {best_val_loss:.4f} "
-                                f"(MSE: {val_mse_loss:.4f}, BCE: {val_bce_loss:.4f}, "
-                                f"OCC: {val_occ_loss:.4f})")
+                                f"Val loss: {best_val_loss:.4f} ({best_parts})")
                             writer.add_scalar("Best Val Loss", best_val_loss, epoch)
                 finally:
                     if ema is not None:
@@ -543,9 +553,10 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
             if is_main:
                 iou_str = "/".join(f"{v:.2f}" for v in bin_iou)
+                occ_str = f" | OCC={epoch_occ_loss:.4f}" if log_occ_loss else ""
                 tqdm.write(
                     f"Epoch {epoch} - LOSS: MSE={epoch_mse_loss:.4f} | "
-                    f"BCE={epoch_bce_loss:.4f} | OCC={epoch_occ_loss:.4f} "
+                    f"BCE={epoch_bce_loss:.4f}{occ_str} "
                     f"| OccIoU={epoch_occ_iou:.3f} "
                     f"| OccOnly MSE={epoch_occ_only_mse:.4f}/CE={epoch_occ_only_ce:.3f} "
                     f"| IoU/σ[clean→noisy]={iou_str}"
