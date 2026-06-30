@@ -59,6 +59,7 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         occ_logsnr_min=-2.0,
         per_sigma_bins=5,
         mask_input_dropout=0.0,
+        void_weight=1.0,
     ):
         super().__init__()
         self.model = model
@@ -83,9 +84,21 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         #   'bce' → occupancy is a proper Bernoulli: channel -1 is a *logit*,
         #           trained with BCE-with-logits + pos_weight to handle imbalance,
         #           and mapped to the data domain (2σ-1 = E[bit]) during sampling.
-        assert occupancy_objective in ('mse', 'bce'), \
+        #   'void' → occupancy is folded into the SEMANTIC categorical: the class
+        #           logits (4:4+n_cls) plus the last channel (a "void"/empty logit)
+        #           form one (n_cls+1)-way softmax.  Empty voxels are the void
+        #           category, so the empty state IS reproducible by the same
+        #           softmax at sampling (occupied class-sum→1, empty class-sum→0,
+        #           mask→±1) — the fix for the sampling flood, where the legacy
+        #           softmax forced class-sum→1 on every voxel and erased the
+        #           "empty" cue.  Occupancy = 1 − P(void).
+        assert occupancy_objective in ('mse', 'bce', 'void'), \
             f"invalid occupancy_objective {occupancy_objective!r}"
         self.occupancy_objective = occupancy_objective
+        # Weight of the void (empty) category in the (n_cls+1)-way CE.  Void is the
+        # majority class; lower it to keep capacity on the real classes, raise it
+        # to prune more aggressively.
+        self.void_weight = void_weight
         self.occ_pos_weight_max = occ_pos_weight_max
         self.occ_loss_weight = occ_loss_weight
         # Label smoothing on the occupancy target (0,1 → eps,1-eps) bounds the
@@ -161,9 +174,23 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         2σ(logit)−1 ∈ (−1,1), so the Gaussian posterior and the threshold-at-0
         readout (remove_mask) both stay in-distribution."""
         n_cls = getattr(self, 'n_classes', None)
+        objective = getattr(self, 'occupancy_objective', 'mse')
+        if objective == 'void':
+            # One (n_cls+1)-way softmax over [class logits, void logit].  This
+            # reproduces BOTH clean states the same way it was trained: occupied →
+            # class-sum 1 / mask +1, empty → class-sum 0 / mask −1.  No more
+            # softmax-forces-sum-1 mismatch, so the sampler can actually go empty.
+            cat = torch.cat([x.data.jdata[:, 4:4 + n_cls],
+                             x.data.jdata[:, -1:]], dim=1)
+            probs = torch.softmax(cat, dim=-1)             # (N, n_cls+1)
+            real = probs[:, :n_cls]                        # P(class), sums to 1−P(void)
+            x.data.jdata[:, 4:4 + n_cls] = real
+            # mask = 1 − 2·P(void) = 2·(class-sum) − 1 ∈ (−1, 1); +1 occupied, −1 void
+            x.data.jdata[:, -1] = 2.0 * real.sum(dim=-1) - 1.0
+            return
         if n_cls:
             x.data.jdata[:, 4:4 + n_cls] = torch.softmax(x.data.jdata[:, 4:4 + n_cls], dim=-1)
-        if getattr(self, 'occupancy_objective', 'mse') == 'bce':
+        if objective == 'bce':
             x.data.jdata[:, -1] = 2.0 * torch.sigmoid(x.data.jdata[:, -1]) - 1.0
 
     @torch.no_grad()
@@ -386,10 +413,12 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # σ-weighting, and the per-σ diagnostics below.
         snr = torch.exp(self.log_snr(times))
 
+        n_cls = self.n_classes
+
         # --- Geometry MSE — optionally Min-SNR-γ / P2 weighted ---
-        # In 'bce' occupancy mode the mask leaves the Gaussian MSE entirely
-        # (it becomes a Bernoulli, below); in legacy 'mse' mode it stays in.
-        if self.occupancy_objective == 'bce':
+        # In 'bce'/'void' the mask leaves the Gaussian MSE (it becomes a Bernoulli
+        # / part of the categorical, below); in legacy 'mse' mode it stays in.
+        if self.occupancy_objective in ('bce', 'void'):
             geom_pred   = pred.jdata[:, :4]
             geom_target = X.jdata[:, :4]
         else:
@@ -410,76 +439,86 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         else:
             mse_loss = F.mse_loss(geom_pred, geom_target)
 
-        # --- Occupancy BCE (Bernoulli structure prior) — imbalance-handled ---
-        # Channel -1 is a logit; target is hard occupancy (occupied vs empty).
-        # pos_weight = #empty / #occupied up-weights the rare occupied class so
-        # the optimum is no longer "predict empty everywhere".
         occ_target_hard = (X.jdata[:, -1] > 0)
-        pred_occ = pred.jdata[:, -1] > 0
-        per_voxel_occ_bce = None
-        if self.occupancy_objective == 'bce':
-            occ_logit  = pred.jdata[:, -1]
-            occ_target = occ_target_hard.float()
-            n_occ   = occ_target.sum().clamp(min=1.0)
-            n_empty = (occ_target.numel() - occ_target.sum()).clamp(min=1.0)
-            pos_weight = (n_empty / n_occ).clamp(max=self.occ_pos_weight_max)
-            eps = self.occ_label_smoothing
-            soft_target = occ_target * (1.0 - 2.0 * eps) + eps if eps > 0 else occ_target
-            per_voxel_occ_bce = F.binary_cross_entropy_with_logits(
-                occ_logit, soft_target, pos_weight=pos_weight, reduction='none')
+        pred_label   = pred.jdata[:, 4:4 + n_cls]
+        target_label = X.jdata[:, 4:4 + n_cls]
+
+        if self.occupancy_objective == 'void':
+            # --- Unified (n_cls+1)-way categorical: [class logits, void logit] ---
+            # Occupancy is no longer a separate channel; it is "not void".  This is
+            # the sampling-flood fix: the same softmax reproduces empty (void) and
+            # occupied states, so the model's empty cue survives at sampling.
+            cat_logits  = torch.cat([pred.jdata[:, 4:4 + n_cls], pred.jdata[:, -1:]], dim=1)
+            void_target = (~occ_target_hard).float()
+            cat_target  = torch.cat([target_label, void_target[:, None]], dim=1)  # rows sum to 1
+            if self.class_weight is not None:
+                w9 = torch.cat([self.class_weight,
+                                self.class_weight.new_tensor([self.void_weight])])
+            else:
+                w9 = None
+            per_voxel_cat_ce = F.cross_entropy(cat_logits, cat_target, weight=w9, reduction='none')
             if self.occ_loss_weighting is not None:
                 w_occ = self._sigma_weight(snr)
-                occ_loss = (w_occ * per_voxel_occ_bce).mean() * self.occ_loss_weight
+                class_loss = (w_occ * per_voxel_cat_ce).mean()
             else:
-                occ_loss = per_voxel_occ_bce.mean() * self.occ_loss_weight
+                class_loss = per_voxel_cat_ce.mean()
+            pred_occ = cat_logits.argmax(dim=1) != n_cls   # occupied = not the void category
+            per_voxel_occ_bce = per_voxel_cat_ce           # for the per-σ diagnostic
+            # OCC is folded into the categorical CE above (no separate gradient).
+            # Report a diagnostic binary occupancy BCE so the OCC column is legible
+            # — computed under no_grad, so it is NOT in the backward / double-counted.
+            with torch.no_grad():
+                p_void = torch.softmax(cat_logits, dim=1)[:, n_cls]
+                p_occ  = (1.0 - p_void).clamp(1e-6, 1.0 - 1e-6)
+                occ_loss = F.binary_cross_entropy(p_occ, occ_target_hard.float())
         else:
-            occ_loss = mse_loss.new_zeros(())
+            # --- Occupancy BCE (Bernoulli structure prior) — imbalance-handled ---
+            # Channel -1 is a logit; pos_weight = #empty/#occupied up-weights the
+            # rare occupied class so the optimum is not "predict empty everywhere".
+            pred_occ = pred.jdata[:, -1] > 0
+            per_voxel_occ_bce = None
+            if self.occupancy_objective == 'bce':
+                occ_logit  = pred.jdata[:, -1]
+                occ_target = occ_target_hard.float()
+                n_occ   = occ_target.sum().clamp(min=1.0)
+                n_empty = (occ_target.numel() - occ_target.sum()).clamp(min=1.0)
+                pos_weight = (n_empty / n_occ).clamp(max=self.occ_pos_weight_max)
+                eps = self.occ_label_smoothing
+                soft_target = occ_target * (1.0 - 2.0 * eps) + eps if eps > 0 else occ_target
+                per_voxel_occ_bce = F.binary_cross_entropy_with_logits(
+                    occ_logit, soft_target, pos_weight=pos_weight, reduction='none')
+                if self.occ_loss_weighting is not None:
+                    w_occ = self._sigma_weight(snr)
+                    occ_loss = (w_occ * per_voxel_occ_bce).mean() * self.occ_loss_weight
+                else:
+                    occ_loss = per_voxel_occ_bce.mean() * self.occ_loss_weight
+            else:
+                occ_loss = mse_loss.new_zeros(())
+            class_loss = F.cross_entropy(pred_label, target_label, self.class_weight)
 
-        # --- Occupancy IoU (diagnostic): is structure actually right, or is the
-        # BCE just inflating from over-confidence?  pred occupied = logit/mask > 0.
+        # --- Occupancy IoU + per-σ + occupied-only diagnostics ---
         with torch.no_grad():
             inter = (pred_occ & occ_target_hard).sum().float()
             union = (pred_occ | occ_target_hard).sum().clamp(min=1).float()
             occ_iou = inter / union
 
-            # --- Per-σ occupancy diagnostics (review item a) ---
             if per_voxel_occ_bce is None:  # 'mse' mode: report the raw mask BCE
                 per_voxel_occ_bce = F.binary_cross_entropy_with_logits(
                     pred.jdata[:, -1], occ_target_hard.float(), reduction='none')
             bce_per_sigma, iou_per_sigma = self._per_sigma_occ_stats(
                 times, per_voxel_occ_bce, pred_occ, occ_target_hard)
 
-            # --- Occupied-only geometry / class metrics (review item a) ---
-            # The aggregate MSE / CE are dominated by zero-filled empty voxels and
-            # read near-zero regardless of learning; restrict to occupied voxels to
-            # see whether geometry and labels are actually fit where it matters.
+            # Occupied-only metrics: the aggregate MSE/CE are dominated by empty
+            # voxels; restrict to occupied to see if geometry/labels are fit there.
             if occ_target_hard.any():
                 occ_only_mse = ((pred.jdata[:, :4] - X.jdata[:, :4])[occ_target_hard]
                                 ** 2).mean()
                 occ_only_ce = F.cross_entropy(
-                    pred.jdata[occ_target_hard, 4:-1],
-                    X.jdata[occ_target_hard, 4:-1],
+                    pred_label[occ_target_hard], target_label[occ_target_hard],
                     self.class_weight)
             else:
                 occ_only_mse = occ_iou.new_zeros(())
                 occ_only_ce = occ_iou.new_zeros(())
-
-        # --- Class loss — softmax CE on occupied voxels only, class-weighted ---
-        class_pred = pred.jdata[:, 4:-1]    # (N, C) logits
-        # if is_occupied.any():
-        #     gt_hard = X.jdata[is_occupied, 4:-1].argmax(dim=-1)    # (N_occ,) hard labels
-        #     class_loss = F.cross_entropy(
-        #         class_pred[is_occupied],
-        #         gt_hard,
-        #         weight=self.class_weight,
-        #     )
-        # else:
-        #     class_loss = class_pred.sum() * 0.0
-
-        pred_label = pred.jdata[:, 4:-1]
-        target_label = X.jdata[:, 4:-1]
-
-        class_loss = F.cross_entropy(pred_label, target_label, self.class_weight)
 
         metrics = {
             'occ_only_mse': occ_only_mse.detach(),

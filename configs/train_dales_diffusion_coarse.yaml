@@ -53,9 +53,16 @@ p2_k: 1.0
 p2_gamma: 1.0
 min_snr_gamma: 5.0
 
-# Occupancy: keep the mask channel diffused (leak intact) — at this coarse res it
-# gave a bimodal, thresholdable field; mask_input_dropout=1.0 floods at sampling.
-occupancy_objective: bce
+# Occupancy via the VOID class (the sampling-flood fix).  Occupancy is folded into
+# the semantic categorical: [8 real classes + 1 'void'] form one softmax, so the
+# empty state (void) is reproducible at sampling — the legacy 'bce' decode forced
+# class-sum→1 on every voxel and erased the empty cue, flooding to ~97% occupied.
+# Occupancy = 1 − P(void); remove_mask keeps P(void) < 0.5 (tune via -occ_threshold).
+# void_weight scales the (majority) void category in the 9-way CE: lower → keep
+# capacity on real classes, higher → prune harder.
+occupancy_objective: void
+void_weight: 1.0
+# (unused in 'void' mode, kept for A/B against occupancy_objective: bce)
 occ_pos_weight_max: 8.0
 occ_loss_weight: 1.0
 occ_label_smoothing: 0.05

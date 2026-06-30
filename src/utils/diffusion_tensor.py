@@ -152,7 +152,7 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
             fvdb.jcat([self.data for _ in range(batch_size)])
         )
 
-    def remove_mask(self, threshold=0):
+    def remove_mask(self, threshold=0.5):
         in_mask = [self.data[i].jdata[:, -1] >
                    threshold for i in range(self.grid_count)]
         jagged_ijks = fvdb.JaggedTensor(
