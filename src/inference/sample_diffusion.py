@@ -139,7 +139,6 @@ def load_dales_diffusion(level, src):
         max_T=cfg.get("max_T", None) if level > 0 else None,
         n_classes=cfg["n_classes"],
         model_upsampler=model_upsampler,
-        occupancy_objective=cfg.get("occupancy_objective", "mse"),
     ).to(device)
     diffusion.eval()
     return diffusion
