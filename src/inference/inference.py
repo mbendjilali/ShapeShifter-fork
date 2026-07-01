@@ -2,7 +2,6 @@ if True:
     import sys
     sys.path.append('./src')
 import argparse
-import glob
 import os
 import laspy
 from utils.fvdb_utils import grid_to_VDB
@@ -58,19 +57,18 @@ def compute_canonical_base_grid(
 
 
 def load_dales_diffusion(level, src):
-    """Load a DALES checkpoint: {src}/dales_{level}_*.pt (picks most recent)."""
+    """Load a DALES checkpoint from *src* (prefers latest ``*_best.pt``)."""
     import utils.fvdb_diffusion as _fvdb_diffusion
     import utils.model as _model
     from utils.model import DiffusionCNN, DiffusionUNet
     from utils.fvdb_diffusion import SparseDiffusion
+    from utils.checkpoint_utils import resolve_latest_checkpoint, default_upsampler_dir
     # Checkpoints were pickled under old top-level names; remap so unpickling works.
     sys.modules.setdefault('fvdb_diffusion', _fvdb_diffusion)
     sys.modules.setdefault('model', _model)
-    models = glob.glob('{}/dales_{}*.pt'.format(src, level))
-    if not models:
-        raise FileNotFoundError(f"No DALES diffusion checkpoint for level {level} in {src}")
-    models.sort(reverse=True)
-    ckpt = torch.load(models[0], weights_only=False)
+    ckpt_path = resolve_latest_checkpoint(src, f"dales_{level}")
+    print(f"Loading diffusion level {level}: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, weights_only=False)
     if not isinstance(ckpt, dict):
         ckpt.eval()
         return ckpt
@@ -121,8 +119,9 @@ def load_dales_diffusion(level, src):
     model.load_state_dict(state_dict)
     model_upsampler = None
     if level > 0:
-        up_ckpt = os.path.join(os.path.dirname(os.path.dirname(src)), 'upsamplers', f'dales_{level}.pt')
-   
+        up_dir = default_upsampler_dir(src)
+        up_ckpt = resolve_latest_checkpoint(up_dir, f"dales_{level}")
+        print(f"Loading upsampler level {level}: {up_ckpt}")
         model_upsampler = torch.load(up_ckpt, weights_only=False)
         model_upsampler.eval()
     diffusion = SparseDiffusion(

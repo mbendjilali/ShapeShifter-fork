@@ -113,7 +113,9 @@ pip install tensorboard
 pip install setuptools==80.9.0
 ```
 
-During training, logs are written under `runs/diffusion_level_{level}_{timestamp}/`.
+During training, TensorBoard event files are written under `runs/`:
+- `runs/diffusion_level_{level}_{timestamp}/`
+- `runs/upsampler_level_{level}_{timestamp}/`
 
 ```shell
 tensorboard --logdir runs --port 6006

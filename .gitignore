@@ -160,6 +160,7 @@ checkpoints
 output
 meshed_output
 runs
+logs
 
 *.pt
 *.pth

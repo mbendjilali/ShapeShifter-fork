@@ -232,7 +232,11 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
     model_upsampler = None
     if args.level > 0:
-        up_ckpt = 'checkpoints/upsamplers/dales_{}.pt'.format(args.level)
+        from checkpoint_utils import resolve_latest_checkpoint
+        up_ckpt = resolve_latest_checkpoint(
+            "checkpoints/upsamplers", f"dales_{args.level}"
+        )
+        print(f"Loading upsampler: {up_ckpt}")
         model_upsampler = torch.load(up_ckpt, weights_only=False).to(device)
         model_upsampler.eval()
 
@@ -281,9 +285,6 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     # MSE = geometry (offset+intensity); BCE = the (n_cls+1)-way categorical CE
     # (semantics + occupancy via the void class).  Occupancy quality is tracked by
     # OccIoU and the per-σ IoU, not a separate loss term.
-    MSE_L, BCE_L, VAL_MSE_L, VAL_BCE_L = [], [], [], []
-    MSE_LOSS_EMA = None
-    BCE_LOSS_EMA = None
     best_val_loss = float('inf')
     best_epoch = -1
     current_time = datetime.today().strftime('%d-%m-%H:%M')
@@ -391,13 +392,6 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             bin_bce = (bin_bce_sum / bin_cnt.clamp(min=1)).tolist()
             bin_iou = (bin_iou_sum / bin_cnt.clamp(min=1)).tolist()
 
-            if not math.isnan(epoch_mse_loss):
-                MSE_LOSS_EMA = epoch_mse_loss if MSE_LOSS_EMA is None else 0.99 * MSE_LOSS_EMA + 0.01 * epoch_mse_loss
-            if not math.isnan(epoch_bce_loss):
-                BCE_LOSS_EMA = epoch_bce_loss if BCE_LOSS_EMA is None else 0.99 * BCE_LOSS_EMA + 0.01 * epoch_bce_loss
-            MSE_L.append(MSE_LOSS_EMA)
-            BCE_L.append(BCE_LOSS_EMA)
-
             if is_main:
                 writer.add_scalars(
                     "Loss/train",
@@ -430,9 +424,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     )
                     val_total_loss = val_mse_loss.item() + val_bce_loss.item()
                     if val_mse_loss is not None and val_bce_loss is not None:
-                        VAL_MSE_L.append((epoch, val_mse_loss.item()))
                         val_suffix += f", Val MSE={val_mse_loss:.4f}"
-                        VAL_BCE_L.append((epoch, val_bce_loss.item()))
                         val_suffix += f" + Val BCE={val_bce_loss:.4f}"
                         val_suffix += f" + Val OccIoU={val_occ_iou:.3f}"
                         writer.add_scalars(

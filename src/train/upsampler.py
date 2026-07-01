@@ -3,7 +3,8 @@ if True:
     sys.path.append('./src')
 import torch
 from tqdm import tqdm
-import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 from utils.model import UpSampler, count_parameters
 import yaml
 import argparse
@@ -13,7 +14,8 @@ import os
 def _train_dales_upsampler(args, cfg, device='cuda'):
     """
     Multi-tile upsampler training for DALES.
-    Checkpoints: checkpoints/upsamplers/dales_{level}.pt
+    Checkpoints: checkpoints/upsamplers/dales_{level}_{timestamp}_best.pt
+    TensorBoard: runs/upsampler_level_{level}_{timestamp}/
     """
     from dataset.dales import DALESDataset
     import math
@@ -37,9 +39,14 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
     steps_per_epoch = math.ceil(len(dataset) / batch_size)
     print(f"  {len(dataset)} crops — {steps_per_epoch} steps/epoch — {n_epochs} epochs")
 
-    L = []
     LOSS_EMA = None
+    best_loss = float('inf')
     count_parameters(model_upsampler)
+
+    current_time = datetime.today().strftime('%d-%m-%H:%M')
+    writer = SummaryWriter(
+        log_dir=f"runs/upsampler_level_{args.level}_{current_time}"
+    )
 
     for epoch in tqdm(range(n_epochs), desc="Epochs"):
         epoch_loss_sum = 0.0
@@ -52,13 +59,24 @@ def _train_dales_upsampler(args, cfg, device='cuda'):
             epoch_loss_sum += loss.item()
         loss_val = epoch_loss_sum / steps_per_epoch
         LOSS_EMA = loss_val if LOSS_EMA is None else 0.99 * LOSS_EMA + 0.01 * loss_val
-        L.append(LOSS_EMA)
+        writer.add_scalars(
+            "Loss/train",
+            {"MSE": loss_val, "MSE_EMA": LOSS_EMA},
+            epoch,
+        )
+        if loss_val < best_loss:
+            best_loss = loss_val
+            best_ckpt = (
+                f"checkpoints/upsamplers/dales_{args.level}_{current_time}_best.pt"
+            )
+            model_upsampler.eval()
+            torch.save(model_upsampler, best_ckpt)
+            model_upsampler.train()
+            tqdm.write(f"New best upsampler at epoch {epoch}: {best_ckpt} — loss {best_loss:.6f}")
 
-    plt.plot(L, label='dales_{}'.format(args.level))
-    plt.legend()
-    plt.savefig('checkpoints/upsamplers/dales_{}.png'.format(args.level))
+    writer.close()
     model_upsampler.eval()
-    ckpt = 'checkpoints/upsamplers/dales_{}.pt'.format(args.level)
+    ckpt = f'checkpoints/upsamplers/dales_{args.level}_{current_time}.pt'
     torch.save(model_upsampler, ckpt)
     print(ckpt)
 
