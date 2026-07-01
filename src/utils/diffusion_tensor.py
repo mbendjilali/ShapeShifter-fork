@@ -1,7 +1,6 @@
 import fvdb
 import torch
 import fvdb.nn as fvnn
-from meshplot import plot
 import numpy as np
 
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
@@ -163,13 +162,3 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
             [self.data[i].jdata[in_mask[i]] for i in range(self.grid_count)])
         feat.jdata[..., -1] = 1
         return DiffusionTensor(new_grid, feat)
-
-    def colored_PC(self, point_size=None, return_plot=True):
-        offset, features, _ = self.get_feature_data(self.jdata)
-        class_probs = features[:, 2:].cpu().detach().numpy()   # (V, 8)
-        class_idx   = class_probs.argmax(axis=-1)            # (V,)
-        c = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / 7.0
-        vstars = offset.cpu().detach().numpy()
-        if return_plot:
-            return plot(vstars, c=c, shading={"point_size": point_size})
-        return vstars, c

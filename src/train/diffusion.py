@@ -20,7 +20,6 @@ if _world_size > 1:
 if True:
     sys.path.append('./src/utils')
 from diffusion_tensor import DiffusionTensor
-from fvdb_utils import *
 from fvdb_diffusion import SparseDiffusion
 from model import DiffusionCNN, DiffusionUNet, count_parameters
 from datetime import datetime
@@ -79,45 +78,6 @@ class WeightEMA:
             if p.requires_grad:
                 p.copy_(self._backup[n])
         self._backup = None
-
-
-# ---------------------------------------------------------------------------
-# Original single-shape helpers (kept for backwards compat)
-# ---------------------------------------------------------------------------
-
-def clip_data(X0, X0_BLUR, size):
-    """Legacy: crops from global voxel list. Used only for single-shape mode."""
-    ind = torch.randint(0, len(X0.grid.ijk.jdata), (X0.grid_count,))
-    centers = X0.grid.ijk.jdata[ind]
-    new_ijk_min = centers - size
-    new_ijk_max = centers + size
-    cf, cg = X0.grid.clip(X0.data, new_ijk_min, new_ijk_max)
-    new_X0 = fvnn.VDBTensor(cg, cf)
-    cf, cg = X0_BLUR.grid.clip(X0_BLUR.data, new_ijk_min, new_ijk_max)
-    new_X0_BLUR = fvnn.VDBTensor(cg, cf)
-    return new_X0, new_X0_BLUR
-
-
-def get_gt_data(cfg, level, model_name):
-    if level == 0:
-        res_1 = cfg["base_resolution"]
-        X0 = torch.load(
-            '{}/{}/{}.pt'.format(cfg["src_path"], model_name, res_1), weights_only=False)
-        return X0.to_custom_dense().to_batch(cfg["batch_size"])
-    else:
-        res_1 = cfg["base_resolution"]*2**(level-1)
-        res_2 = cfg["upsample_fac"]*res_1
-        X = torch.load(
-            '{}/{}/{}.pt'.format(cfg["src_path"], model_name, res_1), weights_only=False)
-        X0 = torch.load(
-            '{}/{}/{}.pt'.format(cfg["src_path"], model_name, res_2), weights_only=False)
-        X_UP = X.trilinear_upsample(cfg["upsample_fac"])
-        X0 = DiffusionTensor.fill_upsampled_with_gt(X_UP, X0)
-        X = X.to_batch(cfg["batch_size"])
-        X0 = X0.to_batch(cfg["batch_size"])
-        X_UP = X_UP.to_batch(cfg["batch_size"])
-        X_UP.grid = X0.grid
-        return X, X_UP, X0
 
 
 # ---------------------------------------------------------------------------
@@ -188,16 +148,16 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
     Launch with torchrun for multi-GPU:
         CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \\
-            src/train/train_diffusion.py -level 0 -config configs/train_dales_diffusion_0.yaml
+            src/train/diffusion.py -level 0 -config configs/training/diffusion_0.yaml
 
     Checkpoints: checkpoints/diffusion_models/dales_{level}_{time}.pt  (rank 0 only)
     """
     import sys
     sys.path.insert(0, './src')
-    from dataset.dales_dataset import DALESDataset, clip_data_per_element
+    from dataset.dales import DALESDataset, clip_data_per_element
 
     is_main = (rank == 0)
-    manifest = cfg.get("manifest_path", "data/dales_manifest.yaml")
+    manifest = cfg.get("manifest_path", "configs/dataset/dales.yaml")
     clip_size = cfg.get("clip_size") if args.level == 0 else None
 
     # ── Accumulation / effective batch ──────────────────────────────────────
@@ -553,7 +513,6 @@ if __name__ == '__main__':
     device = 'cuda'
 
     parser = argparse.ArgumentParser(description='Diffusion training')
-    parser.add_argument('-model_name', type=str, default=None, help="Single-shape name (legacy mode)")
     parser.add_argument('-level', type=int, help="Diffusion level")
     parser.add_argument('-config', type=str, help="Config path")
     parser.add_argument('-dataset', type=str, default=None,

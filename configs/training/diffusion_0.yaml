@@ -10,7 +10,7 @@
 # Requires the 16.pt level on disk: re-encode with configs/encoding/dales.yaml
 # (targets now include 16) so each crop has a 16.pt next to its 64.pt.
 dataset: dales
-manifest_path: configs/dales_manifest.yaml
+manifest_path: configs/dataset/dales.yaml
 src_path: data/dales
 
 upsample_fac: 2
@@ -30,8 +30,6 @@ lr: 0.0001
 batch_size: 8              # coarse dense scenes are tiny (~7k voxels) → larger batch
 accumulate_steps: 1
 
-# FULL-SCENE training — the whole point of coarse-first.  No clipping: every
-# sample is a complete 100m layout, so the model sees global structure.
 random_crop: false
 clip_size: null
 empty_fill: zero
@@ -40,10 +38,10 @@ dropout: 0.05
 time_emb: 128
 ema_decay: 0.999
 
-# Height-above-ground coordinate channel (lets the net tell ground from sky).
+# Height-above-ground coordinate channel.
 # z only: XY position within an arbitrary 100m crop carries no canonical layout,
 # so keep horizontal translation-invariance and let the diffusion noise + learned
-# layout prior place structure.  coord_h_ref: scenes are ≈0..28m tall.
+# layout prior place structure.
 coord_features: z
 coord_h_ref: 30.0
 coord_xy_ref: 100.0
@@ -60,7 +58,7 @@ min_snr_gamma: 5.0
 # the (majority) void category in the CE: lower → more occupancy (0.5 ≈ the ~30%
 # data fraction), higher → prune harder.
 void_weight: 0.5
-per_sigma_bins: 5            # noise-level buckets for the per-σ IoU diagnostic
+per_sigma_bins: 5
 
 diffusion_timesteps: 1000
 save_every: 10

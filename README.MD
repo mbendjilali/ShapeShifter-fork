@@ -24,8 +24,8 @@ Dataset: `/data/moussabendjilali/archive/data/dales_2/{train,test}/*.laz`
 Encode all training tiles as 50×50m crops (0.2m voxels → 3.2m at coarsest level):
 
 ```shell
-python src/encoding/pc_encoding.py --config <config_path> --all --split train
-python src/encoding/pc_encoding.py --config <config_path> --all --split test
+python src/encoding/point_cloud.py --config <config_path> --all --split train
+python src/encoding/point_cloud.py --config <config_path> --all --split test
 ```
 
 Output: `data/GT_sparse_tensors/dales/{tile_id}_x????_y????/{16,32,64,128,256}.pt`
@@ -34,7 +34,7 @@ Output: `data/GT_sparse_tensors/dales/{tile_id}_x????_y????/{16,32,64,128,256}.p
 Optional — add yaw rotation + flip augmentations:
 
 ```shell
-python src/shape_encoding/pc_encoding.py --all --split train --augment
+python src/shape_encoding/point_cloud.py --all --split train --augment
 ```
 
 ## Training
@@ -45,21 +45,21 @@ Level 0 and all upsamplers are **independent** and can run simultaneously on the
 
 ```shell
 # Level 0 diffusion
-CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
-    -config configs/train_dales_diffusion_0.yaml -dataset dales -level 0 &
+CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
+    -config configs/training/diffusion_0.yaml -dataset dales -level 0 &
 
 # Upsamplers levels 1–4 (independent of each other and of level 0)
-CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
-    -config configs/train_dales_upsampler.yaml -dataset dales -level 1 &
+CUDA_VISIBLE_DEVICES=0 python src/train/upsampler.py \
+    -config configs/training/upsampler.yaml -dataset dales -level 1 &
 
-CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
-    -config configs/train_dales_upsampler.yaml -dataset dales -level 2 &
+CUDA_VISIBLE_DEVICES=0 python src/train/upsampler.py \
+    -config configs/training/upsampler.yaml -dataset dales -level 2 &
 
-CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
-    -config configs/train_dales_upsampler.yaml -dataset dales -level 3 &
+CUDA_VISIBLE_DEVICES=0 python src/train/upsampler.py \
+    -config configs/training/upsampler.yaml -dataset dales -level 3 &
 
-CUDA_VISIBLE_DEVICES=0 python src/train/train_upsamplers.py \
-    -config configs/train_dales_upsampler.yaml -dataset dales -level 4 &
+CUDA_VISIBLE_DEVICES=0 python src/train/upsampler.py \
+    -config configs/training/upsampler.yaml -dataset dales -level 4 &
 
 wait
 ```
@@ -71,17 +71,17 @@ Checkpoints: `checkpoints/upsamplers/dales_{level}.pt`
 Levels 1–4 are independent of each other but each requires its upsampler checkpoint.
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
-    -config configs/train_dales_diffusion_up.yaml -dataset dales -level 1 &
+CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
+    -config configs/training/diffusion_up.yaml -dataset dales -level 1 &
 
-CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
-    -config configs/train_dales_diffusion_up.yaml -dataset dales -level 2 &
+CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
+    -config configs/training/diffusion_up.yaml -dataset dales -level 2 &
 
-CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
-    -config configs/train_dales_diffusion_up.yaml -dataset dales -level 3 &
+CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
+    -config configs/training/diffusion_up.yaml -dataset dales -level 3 &
 
-CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
-    -config configs/train_dales_diffusion_up.yaml -dataset dales -level 4 &
+CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
+    -config configs/training_diffusion_up.yaml -dataset dales -level 4 &
 
 wait
 ```
@@ -93,11 +93,11 @@ Checkpoints: `checkpoints/diffusion_models/dales_{level}_{timestamp}.pt`
 Distribute across GPUs to reduce wall-clock time:
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/train/train_diffusion.py \
-    -config configs/train_dales_diffusion_0.yaml -dataset dales -level 0 &
+CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
+    -config configs/training/diffusion_0.yaml -dataset dales -level 0 &
 
-CUDA_VISIBLE_DEVICES=1 python src/train/train_upsamplers.py \
-    -config configs/train_dales_upsampler.yaml -dataset dales -level 1 &
+CUDA_VISIBLE_DEVICES=1 python src/train/upsampler.py \
+    -config configs/training/upsampler.yaml -dataset dales -level 1 &
 # … etc.
 ```
 ## Visualize results on TensorBoard
@@ -145,7 +145,7 @@ http://localhost:6006
 Generate 20 unconditional 50×50m crops (4 crops/batch, DDPM):
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/inference/sample_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
     -dataset dales \
     -src checkpoints/diffusion_models \
     -out output/dales \
@@ -157,7 +157,7 @@ CUDA_VISIBLE_DEVICES=0 python src/inference/sample_diffusion.py \
 Faster with DDIM (100 steps instead of full 1000):
 
 ```shell
-CUDA_VISIBLE_DEVICES=0 python src/inference/sample_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
     -dataset dales -src checkpoints/diffusion_models \
     -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100
 ```

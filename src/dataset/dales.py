@@ -1,5 +1,5 @@
 """
-dales_dataset.py — Multi-crop DALES dataloader for diffusion training.
+dales.py — Multi-crop DALES dataloader for diffusion training.
 
 Discovery: for each tile in the manifest, scans gt_root for directories matching
   {tile_id}_x????_y????/ that contain {base_resolution}.pt.
@@ -38,7 +38,7 @@ class DALESDataset:
     Parameters
     ----------
     manifest_path : str | Path
-        Path to data/dales_manifest.yaml.
+        Path to configs/dataset/dales.yaml.
     split : 'train' | 'test'
         Which split to expose (test tiles are never used during training).
     upsample_fac : int
@@ -114,7 +114,7 @@ class DALESDataset:
         if not self.crops:
             raise RuntimeError(
                 f"No encoded crops found under {self.gt_root} for split={split}. "
-                "Run: python src/shape_encoding/pc_encoding.py --all --split train"
+                "Run: python src/encoding/point_cloud.py --all --split train"
             )
 
         self._cache: dict[str, "DiffusionTensor"] = {}

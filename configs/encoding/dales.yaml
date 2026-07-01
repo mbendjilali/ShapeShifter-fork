@@ -13,9 +13,7 @@ voxel_size_initial: 0.2
 initial_size: 256
 # Pool-by-2 chain from initial_size (256@0.2m): 128@0.4 · 64@0.8 · 32@1.6 · 16@3.2.
 # 16 (3.2m, ~32×32×7 per 100m crop) is the coarse LAYOUT level for coarse-first
-# generation — the whole scene is one training sample (no clipping), so the U-Net
-# learns global layout instead of a translation-invariant per-column marginal.
-# 32 is kept so a future 16→32→64 upsampler chain (upsample_fac=2) can refine it.
+# generation.
 targets: [128, 64, 32, 16]
 
 ground_class: 1

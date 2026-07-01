@@ -30,7 +30,7 @@ import fvdb.nn as fvnn
 
 from utils.helper import reverse_from
 from utils.diffusion_tensor import DiffusionTensor
-from inference.sample_diffusion import (
+from inference.inference import (
     load_dales_diffusion,
     compute_canonical_base_grid,
     export_to_laz,

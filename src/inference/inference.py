@@ -5,19 +5,11 @@ import argparse
 import glob
 import os
 import laspy
-from utils.fvdb_utils import *
-import pymeshlab as ml
+from utils.fvdb_utils import grid_to_VDB
 from utils.diffusion_tensor import DiffusionTensor
 import numpy as np
 import torch
 import time
-
-
-def compute_base_grid(model_name, eval_batch_size, base_res=16, src_path="./data/GT_sparse_tensors"):
-    X0 = torch.load(
-        '{}/{}/{}.pt'.format(src_path, model_name, base_res), weights_only=False)
-    X0 = X0.to_custom_dense().to_batch(eval_batch_size)
-    return X0.grid
 
 
 def compute_canonical_base_grid(
@@ -163,7 +155,7 @@ def compute_all_generations_dales(
     Uses compute_canonical_base_grid instead of a stored crop grid.
     For 100×100m crops: extent_m=100.0, base_res=16, nz=8
       (voxel_size=6.25m, covers 0..50m at level 0).
-    Export point clouds with save_generation_pc.
+    Export point clouds with save_dales_pc.
 
     target_class: int | None — if set, clamp class channels to this label
                   throughout sampling (repaint-style conditioning).
@@ -225,14 +217,6 @@ def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False
     return result
 
 
-def load_diffusion(example_mesh_name, level, src):
-    models = glob.glob('{}/{}_{}*.pt'.format(src, example_mesh_name, level))
-    models.sort()
-    diffusion = torch.load(models[-1], weights_only=False)
-    diffusion.eval()
-    return diffusion
-
-
 def generate_input(generated_X, diffusion):
     with torch.no_grad():
         diffusion.model_upsampler.eval()
@@ -243,21 +227,6 @@ def generate_input(generated_X, diffusion):
         times = times[input_X.data.jidx.long()]
         return diffusion.q_sample(input_X, times)[0], input_X
 
-
-def generate_level(generated_X, i, example_mesh_name, src, ddim_steps=None, verbose=False):
-    diffusion = load_diffusion(example_mesh_name, i, src)
-    diffusion.eval()
-    t0 = time.time()
-    new_XT, X_BLUR = generate_input(generated_X, diffusion)
-    if ddim_steps is None:
-        generated_X = diffusion.ddpm_sample(new_XT)
-    else:
-        generated_X = diffusion.ddim_sample(
-            new_XT, steps=diffusion.max_T//ddim_steps)
-    if verbose:
-        print('LEVEL {}: {}'.format(i, time.time()-t0))
-
-    return DiffusionTensor.from_vdb(generated_X).remove_mask()
 
 def export_to_laz(positions, intensity, class_idx, save_path):
 
@@ -366,9 +335,9 @@ def diagnose_occupancy_dales(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='DALES / ShapeShifter inference')
-    parser.add_argument('-dataset', default=None, type=str,
-                        help="'dales' for DALES mode; omit for legacy single-shape mode")
+    parser = argparse.ArgumentParser(description='DALES inference')
+    parser.add_argument('-dataset', default='dales', type=str,
+                        help="Dataset name (only 'dales' is supported)")
     parser.add_argument('-src', default='checkpoints/diffusion_models/', type=str,
                         help='Folder containing .pt checkpoint files')
     parser.add_argument('-out', default=None, type=str,
@@ -398,40 +367,39 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     SRC = args.src.rstrip('/') + '/'
 
-    # ------------------------------------------------------------------
-    # DALES unconditional generation
-    # ------------------------------------------------------------------
-    if args.dataset == 'dales':
-        OUT = args.out or 'output/dales'
-        os.makedirs(OUT, exist_ok=True)
+    if args.dataset != 'dales':
+        raise ValueError(f"Unsupported dataset: {args.dataset!r}. Only 'dales' is supported.")
 
-        if args.diagnose:
-            diagnose_occupancy_dales(
-                src=SRC, out_dir=OUT, nx=args.base_res, voxel_size=args.voxel_size,
-                nz=args.nz, eval_batch_size=1, ddim_steps=args.ddim_steps)
-            sys.exit(0)
+    OUT = args.out or 'output/dales'
+    os.makedirs(OUT, exist_ok=True)
 
-        n_batches = max(1, args.total_num // args.batch_size)
-        print(f'Generating {n_batches * args.batch_size} DALES crops '
-              f'({n_batches} batches of {args.batch_size}) → {OUT}')
+    if args.diagnose:
+        diagnose_occupancy_dales(
+            src=SRC, out_dir=OUT, nx=args.base_res, voxel_size=args.voxel_size,
+            nz=args.nz, eval_batch_size=1, ddim_steps=args.ddim_steps)
+        sys.exit(0)
 
-        for batch_i in range(n_batches):
-            min_ind = batch_i * args.batch_size
-            t0 = time.time()
-            with torch.no_grad():
-                GX = compute_all_generations_dales(
-                    src=SRC,
-                    nx=args.base_res,
-                    voxel_size=args.voxel_size,
-                    max_level=args.levels,
-                    eval_batch_size=args.batch_size,
-                    ddim_steps=args.ddim_steps,
-                    nz=args.nz,
-                    verbose=True,
-                    target_class=args.target_class,
-                    occ_threshold=args.occ_threshold,
-                )
-            print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving LAZs …')
-            for level_i, g in enumerate(GX):
-                torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
-                save_dales_pc(g, OUT, level=level_i, min_ind=min_ind)
+    n_batches = max(1, args.total_num // args.batch_size)
+    print(f'Generating {n_batches * args.batch_size} DALES crops '
+          f'({n_batches} batches of {args.batch_size}) → {OUT}')
+
+    for batch_i in range(n_batches):
+        min_ind = batch_i * args.batch_size
+        t0 = time.time()
+        with torch.no_grad():
+            GX = compute_all_generations_dales(
+                src=SRC,
+                nx=args.base_res,
+                voxel_size=args.voxel_size,
+                max_level=args.levels,
+                eval_batch_size=args.batch_size,
+                ddim_steps=args.ddim_steps,
+                nz=args.nz,
+                verbose=True,
+                target_class=args.target_class,
+                occ_threshold=args.occ_threshold,
+            )
+        print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving LAZs …')
+        for level_i, g in enumerate(GX):
+            torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
+            save_dales_pc(g, OUT, level=level_i, min_ind=min_ind)

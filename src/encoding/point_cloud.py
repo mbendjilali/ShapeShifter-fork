@@ -1,5 +1,5 @@
 """
-pc_encoding.py — DALES LAZ tile → crops 50×50m → DiffusionTensor pyramid.
+point_cloud.py — DALES LAZ tile → crops 50×50m → DiffusionTensor pyramid.
 
 Feature layout (Route A, 10 channels, slices unchanged from DiffusionTensor):
   [0:3]  PCA normal per voxel (smallest eigenvector of intra-voxel covariance)
@@ -24,16 +24,16 @@ Crop naming: {tile_id}_x{x_start:04d}_y{y_start:04d}
 Usage
 -----
 # Encode one tile as 50×50m crops
-python src/shape_encoding/pc_encoding.py --tile 5080_54435
+python src/shape_encoding/point_cloud.py --tile 5080_54435
 
 # Encode all training tiles
-python src/shape_encoding/pc_encoding.py --all --split train
+python src/shape_encoding/point_cloud.py --all --split train
 
 # Encode + augment (yaw rotations × horizontal flips)
-python src/shape_encoding/pc_encoding.py --tile 5080_54435 --augment
+python src/shape_encoding/point_cloud.py --tile 5080_54435 --augment
 
 # Visual smoke-test: export a crop's 256.pt as PLY
-python src/shape_encoding/pc_encoding.py --tile 5080_54435 --export_ply
+python src/shape_encoding/point_cloud.py --tile 5080_54435 --export_ply
 """
 
 from __future__ import annotations
@@ -249,7 +249,7 @@ def encode_tile_as_crops(
     """
     tile_id = laz_path.stem
     if verbose:
-        print(f"[pc_encoding] {tile_id}  loading …")
+        print(f"[point_cloud] {tile_id}  loading …")
 
     xyz, sem, intensity = load_dales_laz(laz_path)
     if verbose:
@@ -327,7 +327,7 @@ def encode_tile_as_crops_augmented(
     """
     tile_id = laz_path.stem
     if verbose:
-        print(f"[pc_encoding/aug] {tile_id}")
+        print(f"[point_cloud/aug] {tile_id}")
 
     xyz, sem, intensity = load_dales_laz(laz_path)
     crop_origins = _crop_ids(cfg, xyz)
