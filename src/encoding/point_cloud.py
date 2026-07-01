@@ -391,7 +391,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Encode DALES LAZ tiles as 50×50m crops")
-    parser.add_argument("--config", default="/home/moussabendjilali/libs/ShapeShifter/configs/encoding/dales.yaml", help="Encoding configuration file path")
+    parser.add_argument("--config", default="configs/encoding/dales.yaml", help="Encoding configuration file path")
     parser.add_argument("--tile",  default=None, type=str, help="Tile ID (e.g. 5080_54435)")
     parser.add_argument("--all",   action="store_true",    help="Encode all tiles in --split")
     parser.add_argument("--split", default="train", choices=["train", "test"])
@@ -399,7 +399,7 @@ if __name__ == "__main__":
     parser.add_argument("--export_ply",    action="store_true", help="Export first crop's 256.pt as PLY")
     parser.add_argument("--skip_complete", action="store_true",
                         help="Skip crops that already have all pyramid levels on disk")
-    parser.add_argument("--out", default="/home/moussabendjilali/libs/ShapeShifter/data", type=str)
+    parser.add_argument("--out", default="data/dales", type=str)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--crop_size", type=float)
     parser.add_argument("--crop_stride", type=float)

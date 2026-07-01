@@ -17,7 +17,7 @@ pip install .
 cd ../..
 ```
 
-Dataset: `/data/moussabendjilali/archive/data/dales_2/{train,test}/*.laz`
+Dataset: `/path/to/dales_2/{train,test}/*.laz` (set `dales_root` in `configs/encoding/dales.yaml`)
 
 ## Preprocessing
 

@@ -1,4 +1,4 @@
-dales_root: /data/moussabendjilali/archive/data/dales_2
+dales_root: /path/to/dales_2
 gt_root: data/dales
 crop_size_m: 100.0
 crop_stride_m: 100.0
