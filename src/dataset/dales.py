@@ -312,7 +312,7 @@ class DALESDataset:
         split: str,
         level: int,
         n_crops: int = 4,
-        clip_size: int = 20,
+        clip_size: Optional[int] = None,
         device: str = "cuda",
     ) -> Optional[float]:
         """Average diffusion loss on a random subset of held-out crops."""
@@ -339,7 +339,10 @@ class DALESDataset:
                 with torch.no_grad():
                     X0_BLUR = diffusion.model_upsampler(X, X_UP).detach()
                     X0_BLUR.grid = X0.grid
-                    x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
+                    if clip_size is not None:
+                        x0c, blurc = clip_data_per_element(X0, X0_BLUR, clip_size)
+                    else:
+                        x0c, blurc = X0, X0_BLUR
                     mse_loss, bce_loss, _, _, occ_iou, metrics = diffusion(x0c, blurc)
             mse_losses.append(mse_loss)
             bce_losses.append(bce_loss)

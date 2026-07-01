@@ -21,7 +21,7 @@ if True:
     sys.path.append('./src/utils')
 from diffusion_tensor import DiffusionTensor
 from fvdb_diffusion import SparseDiffusion
-from model import DiffusionCNN, DiffusionUNet, count_parameters
+from model import DiffusionUNet, build_diffusion_unet, count_parameters
 from datetime import datetime
 import argparse
 import contextlib
@@ -143,34 +143,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     n_channels = sample_dt.jdata.shape[-1]
     del sample_dt
 
-    unet_depth = cfg.get("unet_depth", 0)
-    if unet_depth > 0:
-        model = DiffusionUNet(
-            channels=cfg["features"],
-            unet_depth=unet_depth,
-            time_emb=cfg["time_emb"],
-            one_layers=cfg["one_layers"],
-            first_ks=cfg["first_ks"],
-            in_channels=n_channels,
-            out_channels=n_channels,
-            dropout=cfg.get("dropout", 0.01),
-            coord_features=cfg.get("coord_features", "none"),
-            coord_h_ref=cfg.get("coord_h_ref", 30.0),
-            coord_xy_ref=cfg.get("coord_xy_ref", 51.0),
-        ).to(device)
-    else:
-        model = DiffusionCNN(
-            channels=cfg["features"],
-            layers=cfg["layers"],
-            time_emb=cfg["time_emb"],
-            one_layers=cfg["one_layers"],
-            first_ks=cfg["first_ks"],
-            in_channels=n_channels,
-            out_channels=n_channels,
-            coord_features=cfg.get("coord_features", "none"),
-            coord_h_ref=cfg.get("coord_h_ref", 30.0),
-            coord_xy_ref=cfg.get("coord_xy_ref", 51.0),
-        ).to(device)
+    model = build_diffusion_unet(cfg, n_channels, device)
     if is_main:
         count_parameters(model)
 
@@ -285,8 +258,12 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                                 with torch.no_grad():
                                     X0_BLUR = model_upsampler(X, X_UP).detach()
                                 X0_BLUR.grid = X0.grid
-                                x0c, bc = clip_data_per_element(
-                                    X0, X0_BLUR, cfg["clip_size"])
+                                clip_sz = cfg.get("clip_size")
+                                if clip_sz is not None:
+                                    x0c, bc = clip_data_per_element(
+                                        X0, X0_BLUR, clip_sz)
+                                else:
+                                    x0c, bc = X0, X0_BLUR
                                 mse_loss, bce_loss, _, _, occ_iou, metrics = diffusion_ddp(x0c, bc)
 
                             loss = (mse_loss + bce_loss) / accumulate_steps

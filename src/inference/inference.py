@@ -67,7 +67,7 @@ def load_dales_diffusion(level, src):
     """Load a DALES checkpoint from *src* (prefers latest ``*_best.pt``)."""
     import utils.fvdb_diffusion as _fvdb_diffusion
     import utils.model as _model
-    from utils.model import DiffusionCNN, DiffusionUNet
+    from utils.model import DiffusionUNet, build_diffusion_unet, _COORD_DIMS
     from utils.fvdb_diffusion import SparseDiffusion
     from utils.checkpoint_utils import resolve_latest_checkpoint, default_upsampler_dir
     # Checkpoints were pickled under old top-level names; remap so unpickling works.
@@ -77,52 +77,24 @@ def load_dales_diffusion(level, src):
     print(f"Loading diffusion level {level}: {ckpt_path}")
     ckpt = torch.load(ckpt_path, weights_only=False)
     if not isinstance(ckpt, dict):
+        if not isinstance(ckpt.model, DiffusionUNet):
+            raise TypeError(
+                f"Checkpoint uses {type(ckpt.model).__name__}; only DiffusionUNet is supported."
+            )
         ckpt.eval()
         return ckpt
     # Best-epoch dict format: reconstruct SparseDiffusion from config + state dict.
     cfg = ckpt["config"]
     state_dict = ckpt["model_state_dict"]
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    from utils.model import _COORD_DIMS
     coord_features = cfg.get("coord_features", "none")
     coord_h_ref = cfg.get("coord_h_ref", 30.0)
     coord_xy_ref = cfg.get("coord_xy_ref", 51.0)
     n_coord = _COORD_DIMS[coord_features]
-    unet_depth = cfg.get("unet_depth", 0)
-    if unet_depth > 0:
-        # FiLM U-Net: time is conditioned, not concatenated; the stem conv's
-        # in_channels = data channels + coordinate channels, so subtract coords.
-        in_channels = state_dict["input_conv.0.weight"].shape[1] - n_coord
-        model = DiffusionUNet(
-            channels=cfg["features"],
-            unet_depth=unet_depth,
-            time_emb=cfg["time_emb"],
-            one_layers=cfg["one_layers"],
-            first_ks=cfg["first_ks"],
-            in_channels=in_channels,
-            out_channels=in_channels,
-            dropout=cfg.get("dropout", 0.01),
-            coord_features=coord_features,
-            coord_h_ref=coord_h_ref,
-            coord_xy_ref=coord_xy_ref,
-        ).to(device)
-    else:
-        # Legacy DiffusionCNN: time AND coords are concatenated at the stem.
-        # [C_out, in_channels + time_emb + n_coord, k, k, k]
-        first_w = next(iter(state_dict.values()))
-        in_channels = first_w.shape[1] - cfg["time_emb"] - n_coord
-        model = DiffusionCNN(
-            channels=cfg["features"],
-            layers=cfg["layers"],
-            time_emb=cfg["time_emb"],
-            one_layers=cfg["one_layers"],
-            first_ks=cfg["first_ks"],
-            in_channels=in_channels,
-            out_channels=in_channels,
-            coord_features=coord_features,
-            coord_h_ref=coord_h_ref,
-            coord_xy_ref=coord_xy_ref,
-        ).to(device)
+    in_channels = state_dict["input_conv.0.weight"].shape[1] - n_coord
+    if cfg.get("unet_depth", 2) <= 0:
+        raise ValueError("Config must set unet_depth >= 1 (DiffusionUNet only).")
+    model = build_diffusion_unet(cfg, in_channels, device)
     model.load_state_dict(state_dict)
     model_upsampler = None
     if level > 0:

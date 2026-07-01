@@ -16,15 +16,6 @@ def count_parameters(model, print_result=True):
         return
     return num
 
-def sinusoidal_embedding(timesteps, dim):
-    half_dim = dim // 2
-    emb = torch.arange(
-        start=0, end=half_dim, dtype=torch.float32, device=timesteps.device)
-    emb = 2**emb * torch.pi
-    emb = timesteps[:, None].float() * emb[None, :]
-    return torch.cat([emb.sin(), emb.cos()], dim=-1)
-
-
 _COORD_DIMS = {'none': 0, 'z': 1, 'xyz': 3}
 
 
@@ -60,49 +51,6 @@ def grid_coord_features(grid, jidx, mode, h_ref, xy_ref):
     if mode == 'xyz':
         feats += [anchored(0, xy_ref), anchored(1, xy_ref)]
     return torch.cat(feats, dim=-1)
-
-
-class DiffusionCNN(nn.Module):
-    def __init__(self, channels, layers=2, time_emb=6, one_layers=1, first_ks=3, in_channels=1, out_channels=1, dropout=.01,
-                 coord_features='none', coord_h_ref=30.0, coord_xy_ref=51.0):
-        super(DiffusionCNN, self).__init__()
-        self.out_channels = out_channels
-        self.time_emb = time_emb
-        self.coord_features = coord_features
-        self.coord_h_ref = coord_h_ref
-        self.coord_xy_ref = coord_xy_ref
-        n_coord = _COORD_DIMS[coord_features]
-        self.net = [
-            fvnn.SparseConv3d(in_channels+self.time_emb+n_coord,
-                              channels, kernel_size=first_ks, stride=1),
-            fvnn.Dropout(dropout),
-            fvnn.SiLU(inplace=True)]
-        for _ in range(layers-1):
-            self.net += [
-                fvnn.SparseConv3d(channels, channels, kernel_size=3, stride=1),
-                fvnn.Dropout(dropout),
-                fvnn.SiLU(inplace=True)
-            ]
-        for _ in range(one_layers):
-            self.net += [
-                fvnn.SparseConv3d(channels, channels, kernel_size=3, stride=1),
-                fvnn.SiLU(inplace=True)
-            ]
-        self.net.append(fvnn.SparseConv3d(
-            channels, out_channels, kernel_size=1, stride=1))
-        self.net = nn.Sequential(*self.net)
-
-    def forward(self, x, t, cond=None):
-        t = sinusoidal_embedding(t, self.time_emb)
-        parts = [x.data.jdata, t]
-        coords = grid_coord_features(
-            x.grid, x.data.jidx, getattr(self, 'coord_features', 'none'),
-            getattr(self, 'coord_h_ref', 30.0), getattr(self, 'coord_xy_ref', 51.0))
-        if coords is not None:
-            parts.insert(1, coords.to(x.data.jdata.dtype))
-        new_x = fvnn.VDBTensor(x.grid, x.grid.jagged_like(
-            torch.cat(parts, -1)))
-        return self.net(new_x)
 
 
 class _SparseLayerNorm(nn.Module):
@@ -226,7 +174,7 @@ class FiLMBottleneckBlock(nn.Module):
 
 class DiffusionUNet(nn.Module):
     """
-    U-Net variant of DiffusionCNN with FiLM noise conditioning.
+    FiLM-conditioned sparse U-Net denoiser for diffusion.
 
     All levels share the same channel width (`channels`).  Skip connections
     concatenate encoder and decoder features (2×channels) then project back
@@ -338,6 +286,23 @@ class DiffusionUNet(nn.Module):
             x = block(x, temb)
 
         return self.output_conv(x)
+
+
+def build_diffusion_unet(cfg, n_channels, device="cuda"):
+    """Construct a DiffusionUNet from a training config dict."""
+    return DiffusionUNet(
+        channels=cfg["features"],
+        unet_depth=cfg.get("unet_depth", 2),
+        time_emb=cfg["time_emb"],
+        one_layers=cfg["one_layers"],
+        first_ks=cfg["first_ks"],
+        in_channels=n_channels,
+        out_channels=n_channels,
+        dropout=cfg.get("dropout", 0.01),
+        coord_features=cfg.get("coord_features", "none"),
+        coord_h_ref=cfg.get("coord_h_ref", 30.0),
+        coord_xy_ref=cfg.get("coord_xy_ref", 51.0),
+    ).to(device)
 
 
 class UpSampler(nn.Module):
