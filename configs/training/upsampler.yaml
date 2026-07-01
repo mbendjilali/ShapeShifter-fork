@@ -1,16 +1,15 @@
-# DALES — upsampler pre-training
+# DALES — upsampler pre-training (must match encoding pyramid / diffusion_up.yaml)
 dataset: dales
 manifest_path: configs/dataset/dales.yaml
 src_path: data/dales
 
 upsample_fac: 2
-base_resolution: 64
-
-
+base_resolution: 16
 
 layers: 1
 lr: 0.0005
 features: 64
 dropout: 0.05
 epochs: 300
-batch_size: 16
+batch_size: 4
+accumulate_steps: 4

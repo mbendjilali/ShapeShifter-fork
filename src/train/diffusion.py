@@ -84,63 +84,7 @@ class WeightEMA:
 # Prefetch helper
 # ---------------------------------------------------------------------------
 
-import queue
-import threading
-
-class _PrefetchLoader:
-    """
-    Background thread that keeps `capacity` batches ready in a queue.
-    Eliminates disk I/O stall between GPU steps.
-
-    Usage:
-        loader = _PrefetchLoader(dataset, split, level, batch_size, device)
-        loader.start()
-        for i in range(epochs):
-            batch = loader.next()  # blocks only if queue is empty (rare)
-        loader.stop()
-    """
-    def __init__(self, dataset, split, level, batch_size, device, capacity=2):
-        self._dataset    = dataset
-        self._split      = split
-        self._level      = level
-        self._batch_size = batch_size
-        self._device     = device
-        self._q          = queue.Queue(maxsize=capacity)
-        self._stop_evt   = threading.Event()
-        self._thread     = threading.Thread(target=self._worker, daemon=True)
-
-    def _worker(self):
-        while not self._stop_evt.is_set():
-            try:
-                batch = self._dataset.sample_batch(
-                    self._split, self._level, self._batch_size, self._device)
-                self._q.put(batch)
-            except Exception as e:
-                self._q.put(e)
-
-    def start(self):
-        self._thread.start()
-        return self
-
-    def next(self):
-        item = self._q.get()
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    def stop(self):
-        self._stop_evt.set()
-        # drain so the worker thread can exit
-        try:
-            while True:
-                self._q.get_nowait()
-        except queue.Empty:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# DALES dataset training
-# ---------------------------------------------------------------------------
+from prefetch_loader import PrefetchLoader
 
 def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     """
@@ -293,7 +237,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         log_dir=f"runs/diffusion_level_{args.level}_{current_time}"
     ) if is_main else None
 
-    loader = _PrefetchLoader(
+    loader = PrefetchLoader(
         dataset, "train", args.level, micro_batch, device, capacity=2
     ).start()
 
