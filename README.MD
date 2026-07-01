@@ -21,23 +21,28 @@ Dataset: `/data/moussabendjilali/archive/data/dales_2/{train,test}/*.laz`
 
 ## Preprocessing
 
-Encode all training tiles as 50×50m crops (0.2m voxels → 3.2m at coarsest level):
+Encode tiles as 100×100 m crops (0.2 m voxels at finest level → 3.2 m at coarsest):
 
 ```shell
-python src/encoding/point_cloud.py --config <config_path> --all --split train
-python src/encoding/point_cloud.py --config <config_path> --all --split test
+python src/encoding/point_cloud.py \
+    --config configs/encoding/dales.yaml --out data/dales --all --split train
+
+python src/encoding/point_cloud.py \
+    --config configs/encoding/dales.yaml --out data/dales --all --split test
 ```
 
-Output: `data/GT_sparse_tensors/dales/{tile_id}_x????_y????/{16,32,64,128,256}.pt`
-~2900 crops for train, ~1100 for test.
+Output: `data/dales/{train,test}/{tile_id}_x????_y????/{16,32,64,128,256}.pt`
 
 Optional — add yaw rotation + flip augmentations:
 
 ```shell
-python src/shape_encoding/point_cloud.py --all --split train --augment
+python src/encoding/point_cloud.py \
+    --config configs/encoding/dales.yaml --out data/dales --all --split train --augment
 ```
 
 ## Training
+
+Run from the project root. Configs default to `-dataset dales`.
 
 ### Phase 1 — Diffusion level 0 + Upsamplers (parallel)
 
@@ -81,7 +86,7 @@ CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
     -config configs/training/diffusion_up.yaml -dataset dales -level 3 &
 
 CUDA_VISIBLE_DEVICES=0 python src/train/diffusion.py \
-    -config configs/training_diffusion_up.yaml -dataset dales -level 4 &
+    -config configs/training/diffusion_up.yaml -dataset dales -level 4 &
 
 wait
 ```
@@ -100,49 +105,31 @@ CUDA_VISIBLE_DEVICES=1 python src/train/upsampler.py \
     -config configs/training/upsampler.yaml -dataset dales -level 1 &
 # … etc.
 ```
-## Visualize results on TensorBoard
 
-### 1. Install TensorBoard
+## Visualize results on TensorBoard
 
 ```shell
 pip install tensorboard
 pip install setuptools==80.9.0
 ```
 
-### 2. Train the model
-Run the training script as usual. During training, TensorBoard log files will be created in the ```runs/``` directory:
-
-```shell
-runs/
-├── level_0/
-├── level_1/
-├── level_2/
-└── level_3/
-```
-
-Each directory corresponds to one diffusion level.
-
-### 3. Launch TensorBoard
-From the project root directory, start TensorBoard:
+During training, logs are written under `runs/diffusion_level_{level}_{timestamp}/`.
 
 ```shell
 tensorboard --logdir runs --port 6006
 ```
 
-Then, from your computer, create a SSH tunnel:
+SSH tunnel from your machine:
 
 ```shell
 ssh -L 6006:localhost:6006 <user_name>@<remote_server>
 ```
 
-And open the following address in the browser:
-
-http://localhost:6006
-
+Open http://localhost:6006
 
 ## Generation
 
-Generate 20 unconditional 50×50m crops (4 crops/batch, DDPM):
+Generate 20 unconditional crops (4 crops/batch, DDPM). Grid options must match level-0 training (`configs/training/diffusion_0.yaml`: 3.2 m voxels on `16.pt`).
 
 ```shell
 CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
@@ -151,7 +138,8 @@ CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
     -out output/dales \
     -levels 4 \
     -batch_size 4 \
-    -total_num 20
+    -total_num 20 \
+    -base_res 16 -voxel_size 3.2 -nz 7
 ```
 
 Faster with DDIM (100 steps instead of full 1000):
@@ -159,9 +147,19 @@ Faster with DDIM (100 steps instead of full 1000):
 ```shell
 CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
     -dataset dales -src checkpoints/diffusion_models \
-    -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100
+    -out output/dales -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100 \
+    -base_res 16 -voxel_size 3.2 -nz 7
 ```
 
 Outputs in `output/dales/`:
-- `gen_{i}_{level}.ply` — point cloud at each pyramid level, coloured by semantic class
-- `gen_{i}_{level}.pt`  — raw DiffusionTensor (for downstream use)
+- `gen_{i}_{level}.laz` — point cloud at each pyramid level, coloured by semantic class
+- `gen_{i}_{level}.pt` — raw DiffusionTensor (for downstream use)
+
+## Diagnostics
+
+Quick checkpoint checks (reconstruction + class-conditional sampling):
+
+```shell
+python src/run_tests.py --test AB --level 0 \
+    --crop 5080_54435_x0000_y0050 --split test --class_ids 7
+```
