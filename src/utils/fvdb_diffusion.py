@@ -146,9 +146,9 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
             if time_next == 0:
                 return x_start
 
-            # Optionnal: clip x0
+            # blend the x0 estimate toward the upsampler output (matches q_sample)
             if not X_Blur is None:
-                gamma = time_next/self.max_T
+                gamma = self.blend_gamma(time_next)
                 start_data = (1-gamma[:, None])*x_start.jdata + \
                     gamma[:, None]*X_Blur.jdata
             else:
@@ -255,6 +255,18 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
     def sample(self, noisy_grid: fvnn.VDBTensor):
         return self.ddim_sample(noisy_grid)
 
+    def blend_gamma(self, t: torch.Tensor) -> torch.Tensor:
+        """SR3-style upsampler-blend weight for level>0 refinement.
+
+        Interpolates the diffusion target between the fine GT (γ=0, at t=0) and the
+        upsampler estimate X_Blur (γ=1, at the top of the truncated schedule
+        t = max_T/timesteps).  So the reverse process starts anchored on the
+        upsampler output and denoises toward the GT — the model learns to *refine*
+        the upsampler, instead of denoising GT and ignoring the estimate.
+        (The previous `t/max_T` was ~timesteps× too small, so γ≈0 always and the
+        estimate was never blended in — the level>0 diffusion degraded it.)"""
+        return (t * self.timesteps / self.max_T).clamp(0., 1.)
+
     def q_sample(self, X: fvnn.VDBTensor, times: torch.tensor, X_Blur: fvnn.VDBTensor = None):
         assert len(times) == len(X.data.jidx)
         # compute constant
@@ -264,9 +276,9 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         # random noise
         noise = torch.randn_like(X.jdata)
 
-        # compute gamma
+        # blend the clean target toward the upsampler estimate at high noise
         if not X_Blur is None:
-            gamma = times/self.max_T
+            gamma = self.blend_gamma(times)
             target_X = (1-gamma[:, None])*X.jdata + gamma[:, None]*X_Blur.jdata
         else:
             target_X = X.jdata
