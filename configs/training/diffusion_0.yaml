@@ -23,7 +23,12 @@ features: 128
 epochs: 100                 # coarse scenes are cheap; train longer on the small set
 
 n_classes: 8
-class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
+# Uniform class weights.  Inverse-frequency weighting (a segmentation habit) makes
+# a GENERATIVE model over-produce the up-weighted rare classes (Cars/Trucks) and
+# under-produce the down-weighted common ones (Ground) — it skews the class
+# marginal away from the data.  For generation we want the true marginal, so 1s.
+# (void_weight, appended after these, stays the occupancy-calibration knob.)
+class_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 lr: 0.0001
 batch_size: 8              # coarse dense scenes are tiny (~7k voxels) → larger batch

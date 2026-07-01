@@ -85,9 +85,16 @@ def evaluate(diff, crops, res1, res2, upsample_fac, threshold, steps, device):
         iou_d = occ_iou(d_occ, gt_occ)
         acc_up = (up_cls[gt_occ] == gt_cls[gt_occ]).float().mean().item()
         acc_d = (d_cls[gt_occ] == gt_cls[gt_occ]).float().mean().item()
-        rows.append((os.path.basename(cp), iou_up, iou_d, acc_up, acc_d))
-        print(f"  {os.path.basename(cp):<32} occIoU up={iou_up:.3f} diff={iou_d:.3f} "
-              f"| clsAcc up={acc_up:.3f} diff={acc_d:.3f}  ({time.time()-t0:.1f}s)")
+        # Occupancy fraction over the (fixed) fine grid — flooding shows up as
+        # frac_d ≫ frac_gt (D1 saturating to solid "lego blocks").
+        frac_gt = gt_occ.float().mean().item()
+        frac_up = up_occ.float().mean().item()
+        frac_d = d_occ.float().mean().item()
+        rows.append((os.path.basename(cp), iou_up, iou_d, acc_up, acc_d,
+                     frac_gt, frac_up, frac_d))
+        print(f"  {os.path.basename(cp):<28} occIoU up={iou_up:.3f} diff={iou_d:.3f} "
+              f"| occFrac gt={frac_gt:.2f} up={frac_up:.2f} diff={frac_d:.2f} "
+              f"| clsAcc up={acc_up:.3f} diff={acc_d:.3f}")
     return rows
 
 
@@ -132,9 +139,14 @@ def main():
     iou_d = st.mean(r[2] for r in rows)
     acc_up = st.mean(r[3] for r in rows)
     acc_d = st.mean(r[4] for r in rows)
+    frac_gt = st.mean(r[5] for r in rows)
+    frac_up = st.mean(r[6] for r in rows)
+    frac_d = st.mean(r[7] for r in rows)
     print(f"\n{'='*60}\nAveraged over {len(rows)} crops")
     print(f"  occupancy IoU :  upsampler={iou_up:.3f}   diffusion={iou_d:.3f}   "
           f"Δ={iou_d-iou_up:+.3f}")
+    print(f"  occ fraction  :  gt={frac_gt:.3f}   upsampler={frac_up:.3f}   "
+          f"diffusion={frac_d:.3f}   (diff≫gt ⇒ flooding to lego blocks)")
     print(f"  semantic acc  :  upsampler={acc_up:.3f}   diffusion={acc_d:.3f}   "
           f"Δ={acc_d-acc_up:+.3f}")
     if iou_d - iou_up > 0.02:
