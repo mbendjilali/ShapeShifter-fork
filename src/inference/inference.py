@@ -11,31 +11,38 @@ import torch
 import time
 
 
+# Level-0 coarse layout — must match configs/training/diffusion_0.yaml and 16.pt
+# encoding (3.2 m voxels, 100 m crop → ~32×32×7 dense bbox).
+LEVEL0_NX = 32
+LEVEL0_NZ = 7
+LEVEL0_VOXEL_SIZE = 3.2
+LEVEL0_PYRAMID_RES = 16  # coarsest .pt filename label (not the XY voxel count)
+
+
 def compute_canonical_base_grid(
-    nx: int = 64,
-    nz: int = 36,
-    voxel_size: float = 0.8,
+    nx: int = LEVEL0_NX,
+    nz: int = LEVEL0_NZ,
+    voxel_size: float = LEVEL0_VOXEL_SIZE,
     batch: int = 1,
     device: str = "cuda",
 ):
     """
     DALES unconditional sampling: a fully-occupied dense base grid.
 
-    This MUST match the training-window geometry, or the denoiser is queried
-    off-distribution (the previous version used voxel_size=1.5625m and nz=8 —
-    both wrong — which produced the stacked flat sheets).  Encoded crops use
-    voxel_size=0.8m, ~64 voxels in XY (a clipped window) and ~36 voxels of
-    vertical extent (≈ ground→28m).  The world-Z origin is voxel_size/2, exactly
-    as in encoding, so the height feature (grid_coord_features) reads identically
-    here and in training: the bottom layer is ground (height 0).
+    Must match level-0 training geometry (``diffusion_0.yaml``): 100 m crop,
+    3.2 m voxels on ``16.pt`` → roughly 32×32×7.  ``LEVEL0_PYRAMID_RES`` (16)
+    is the pyramid *filename* label; ``nx`` is the XY voxel count (~100/3.2).
+
+    World origin is ``voxel_size/2`` per axis, as in encoding, so the height
+    coord channel (``coord_features: z``) matches training.
 
     All voxels start active (mask=+1); the model prunes via the mask channel.
 
     Parameters
     ----------
-    nx : int        Number of voxels in X and Y (footprint), default 64.
-    nz : int        Number of voxels in Z (vertical extent), default 36.
-    voxel_size : float  Metres per voxel — must equal the encoding value (0.8).
+    nx : int        Voxels in X and Y (footprint at level 0).
+    nz : int        Voxels in Z (vertical extent at level 0).
+    voxel_size : float  Metres per voxel (3.2 for ``16.pt`` / diffusion_0).
     batch : int     Number of independent samples.
     device : str
 
@@ -137,23 +144,21 @@ def load_dales_diffusion(level, src):
 
 def compute_all_generations_dales(
     src,
-    nx=64,
-    voxel_size=0.8,
+    nx=LEVEL0_NX,
+    voxel_size=LEVEL0_VOXEL_SIZE,
     max_level=4,
     eval_batch_size=5,
     features=13,
     ddim_steps=None,
     verbose=False,
-    nz=36,
+    nz=LEVEL0_NZ,
     target_class=None,
     occ_threshold=0.0,
 ):
     """
     Unconditional DALES generation: noise → level 0 → … → level max_level.
 
-    Uses compute_canonical_base_grid instead of a stored crop grid.
-    For 100×100m crops: extent_m=100.0, base_res=16, nz=8
-      (voxel_size=6.25m, covers 0..50m at level 0).
+    Level-0 grid defaults match ``diffusion_0.yaml`` (32×32×7 @ 3.2 m).
     Export point clouds with save_dales_pc.
 
     target_class: int | None — if set, clamp class channels to this label
@@ -269,7 +274,8 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
 
 
 def diagnose_occupancy_dales(
-    src, out_dir, nx=64, voxel_size=0.8, nz=36, eval_batch_size=1, features=13,
+    src, out_dir, nx=LEVEL0_NX, voxel_size=LEVEL0_VOXEL_SIZE, nz=LEVEL0_NZ,
+    eval_batch_size=1, features=13,
     ddim_steps=None, thresholds=(-0.5, 0.0, 0.3, 0.6, 0.85),
 ):
     """Read-only occupancy diagnostic for the level-0 model (review #1).
@@ -349,12 +355,12 @@ if __name__ == '__main__':
                         help='Crops generated per forward pass')
     parser.add_argument('-total_num', default=1, type=int,
                         help='Total number of crops to generate')
-    parser.add_argument('-base_res', default=64, type=int,
-                        help='XY voxels of the level-0 canonical grid (footprint), matching training clips')
-    parser.add_argument('-voxel_size', default=0.8, type=float,
-                        help='Metres per voxel at level 0 — MUST match encoding (0.8)')
-    parser.add_argument('-nz', default=36, type=int,
-                        help='Z voxels at level 0 (0.8m/vox → 36 ≈ ground..28m, matching DALES crops)')
+    parser.add_argument('-base_res', default=LEVEL0_NX, type=int,
+                        help='XY voxels of the level-0 canonical grid (~100m / voxel_size)')
+    parser.add_argument('-voxel_size', default=LEVEL0_VOXEL_SIZE, type=float,
+                        help='Metres per voxel at level 0 (3.2 for diffusion_0 / 16.pt)')
+    parser.add_argument('-nz', default=LEVEL0_NZ, type=int,
+                        help='Z voxels at level 0 (~7 for diffusion_0 coarse layout)')
     parser.add_argument('-class', dest='target_class', default=None, type=int,
                         help='Clamp class channels to this label during sampling (0-7, repaint-style)')
     parser.add_argument('-occ_threshold', default=0.0, type=float,

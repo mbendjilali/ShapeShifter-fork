@@ -131,7 +131,7 @@ Open http://localhost:6006
 
 ## Generation
 
-Generate 20 unconditional crops (4 crops/batch, DDPM). Grid options must match level-0 training (`configs/training/diffusion_0.yaml`: 3.2 m voxels on `16.pt`).
+Generate 20 unconditional crops (4 crops/batch, DDPM). Defaults match level-0 training (`diffusion_0.yaml`: ~32×32×7 @ 3.2 m on `16.pt`).
 
 ```shell
 CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
@@ -140,8 +140,7 @@ CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
     -out output/dales \
     -levels 4 \
     -batch_size 4 \
-    -total_num 20 \
-    -base_res 16 -voxel_size 3.2 -nz 7
+    -total_num 20
 ```
 
 Faster with DDIM (100 steps instead of full 1000):
@@ -149,8 +148,7 @@ Faster with DDIM (100 steps instead of full 1000):
 ```shell
 CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
     -dataset dales -src checkpoints/diffusion_models \
-    -out output/dales -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100 \
-    -base_res 16 -voxel_size 3.2 -nz 7
+    -out output/dales -levels 4 -batch_size 4 -total_num 20 -ddim_steps 100
 ```
 
 Outputs in `output/dales/`:

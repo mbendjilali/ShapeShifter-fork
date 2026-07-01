@@ -1,25 +1,23 @@
 """
-point_cloud.py — DALES LAZ tile → crops 50×50m → DiffusionTensor pyramid.
+point_cloud.py — DALES LAZ tile → 100×100 m crops → DiffusionTensor pyramid.
 
 Feature layout (Route A, 10 channels, slices unchanged from DiffusionTensor):
-  [0:3]  PCA normal per voxel (smallest eigenvector of intra-voxel covariance)
-  [3:6]  local offset = (mean_pt − voxel_center) / voxel_size  [INVARIANT]
-  [6]    intensity normalised to [0, 1]
-  [7]    semantic class: (sem_class − 1) / (N_CLASSES − 1)  ∈ [0, 1]
-  [8]    mask = 1  [INVARIANT]
+  [0:3]  local offset = (mean_pt − voxel_center) / voxel_size  [INVARIANT]
+  [3]    intensity normalised to [0, 1]
+  [4:12] semantic class probabilities (8 DALES classes)
+  [12]   mask = 1  [INVARIANT]
 
-Voxel sizes per level (50×50m crop):
-  256.pt  0.2 m/voxel  (~250 × 250 in XY)
+Voxel sizes per level (100×100 m crop):
+  256.pt  0.2 m/voxel
   128.pt  0.4 m/voxel
    64.pt  0.8 m/voxel
    32.pt  1.6 m/voxel
-   16.pt  3.2 m/voxel  (~16 × 16 × 11 in XY × Z)
+   16.pt  3.2 m/voxel  (~32 × 32 × 7 in XY × Z — level-0 diffusion grid)
 
-Level 0 dense base at 16.pt: ~16 × 16 × 11 ≈ 2 800 voxels
-vs. the old full-tile approach: 16 × 16 × 3 ≈ 800 voxels at 32 m/voxel.
+Level 0 training loads 16.pt and densifies to ~32×32×7 ≈ 7k voxels.
 
 Crop naming: {tile_id}_x{x_start:04d}_y{y_start:04d}
-  e.g. data/GT_sparse_tensors/dales/5080_54435_x0000_y0050/256.pt
+  e.g. data/dales/train/5080_54435_x0000_y0050/256.pt
 
 Usage
 -----

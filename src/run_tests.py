@@ -34,6 +34,10 @@ from inference.inference import (
     load_dales_diffusion,
     compute_canonical_base_grid,
     export_to_laz,
+    LEVEL0_NX,
+    LEVEL0_NZ,
+    LEVEL0_VOXEL_SIZE,
+    LEVEL0_PYRAMID_RES,
 )
 
 CLASS_NAMES = [
@@ -65,17 +69,17 @@ def run_test_A(
     diff,
     crop_path: str,
     level: int,
-    base_res: int,
+    pyramid_res: int,
     t_list,
     out_dir: str,
 ) -> None:
     """Add noise at each t in t_list, reverse-denoise, and export to LAZ."""
-    resolution = base_res * (2 ** level)
+    resolution = pyramid_res * (2 ** level)
     pt_file = Path(crop_path) / f"{resolution}.pt"
     if not pt_file.exists():
         raise FileNotFoundError(
             f"Crop file not found: {pt_file}\n"
-            f"  Expected resolution {resolution} for level {level} (base_res={base_res})."
+            f"  Expected resolution {resolution} for level {level} (pyramid_res={pyramid_res})."
         )
 
     print(f"[test_A] Loading {pt_file}")
@@ -107,8 +111,9 @@ def run_test_A(
 @torch.no_grad()
 def run_test_B(
     diff,
-    base_res: int,
+    nx: int,
     nz: int,
+    voxel_size: float,
     class_ids,
     seed: int,
     out_dir: str,
@@ -119,11 +124,11 @@ def run_test_B(
     t_start = diff.max_T / diff.timesteps  # always ≤ 1.0; equals 1.0 at level 0
 
     base_grid = compute_canonical_base_grid(
-        base_res=base_res,
-        extent_m=100.0,
+        nx=nx,
+        nz=nz,
+        voxel_size=voxel_size,
         batch=1,
         device=str(device),
-        nz=nz,
     )
 
     os.makedirs(out_dir, exist_ok=True)
@@ -215,15 +220,23 @@ def parse_args():
     # --- grid shape (shared) ---
     g_group = p.add_argument_group("grid options")
     g_group.add_argument(
-        "--base_res", type=int, default=64,
+        "--pyramid_res", type=int, default=LEVEL0_PYRAMID_RES,
         help=(
-            "Coarsest grid resolution. Crop .pt file for level N is loaded at "
-            "resolution base_res * 2**level."
+            "Coarsest pyramid .pt label for test_A. Crop file at level N is "
+            "pyramid_res * 2**level (16 → 16.pt at level 0 for diffusion_0)."
         ),
     )
     g_group.add_argument(
-        "--nz", type=int, default=8,
-        help="Z voxels for the canonical base grid used in test_B.",
+        "--nx", type=int, default=LEVEL0_NX,
+        help="XY voxels for test_B canonical grid (~100m / voxel_size).",
+    )
+    g_group.add_argument(
+        "--voxel_size", type=float, default=LEVEL0_VOXEL_SIZE,
+        help="Metres per voxel for test_B (3.2 for diffusion_0).",
+    )
+    g_group.add_argument(
+        "--nz", type=int, default=LEVEL0_NZ,
+        help="Z voxels for test_B canonical grid.",
     )
 
     return p.parse_args()
@@ -270,7 +283,7 @@ def main():
         print(f"  crop     : {crop_path}")
         print(f"  t values : {args.t_list}")
         print(f"{'='*60}")
-        run_test_A(diff, crop_path, args.level, args.base_res, args.t_list, out_dir)
+        run_test_A(diff, crop_path, args.level, args.pyramid_res, args.t_list, out_dir)
         print(f"\nDone. Results written to: {out_dir}")
 
     if args.test in ("B", "AB"):
@@ -288,9 +301,12 @@ def main():
             print(f"Test B — class-conditional generation  [level={level}]")
             print(f"  class_ids : {args.class_ids}")
             print(f"  seed      : {args.seed}")
-            print(f"  base_res  : {args.base_res}  nz : {args.nz}")
+            print(f"  nx        : {args.nx}  nz : {args.nz}  voxel_size : {args.voxel_size}")
             print(f"{'='*60}")
-            run_test_B(diff, args.base_res, args.nz, args.class_ids, args.seed, out_dir)
+            run_test_B(
+                diff, args.nx, args.nz, args.voxel_size,
+                args.class_ids, args.seed, out_dir,
+            )
             print(f"\nDone. Results written to: {out_dir}")
 
 
