@@ -27,10 +27,18 @@ from inference.inference import (
 N_CLS = 8
 
 
-def class_counts(dt):
+def class_counts(dt, sample=False):
+    """Per-class counts over occupied voxels. sample=True draws class ~ softmax
+    (reproduces the marginal); sample=False uses argmax (mode → majority bias)."""
     if dt.jdata.shape[0] == 0:
         return np.zeros(N_CLS, dtype=np.int64)
-    cls = dt.jdata[:, 4:4 + N_CLS].argmax(-1).cpu().numpy()
+    probs = dt.jdata[:, 4:4 + N_CLS]
+    if sample:
+        p = probs.clamp(min=0)
+        p = p / p.sum(-1, keepdim=True).clamp(min=1e-9)
+        cls = torch.multinomial(p, 1).squeeze(-1).cpu().numpy()
+    else:
+        cls = probs.argmax(-1).cpu().numpy()
     return np.bincount(cls, minlength=N_CLS)
 
 
@@ -96,7 +104,8 @@ def main():
         cols = [("data", d_counts)]
 
         gen = gen_Xs[level]
-        cols.append((f"D{level}", class_counts(gen)))
+        cols.append((f"D{level}argmax", class_counts(gen, sample=False)))
+        cols.append((f"D{level}sample", class_counts(gen, sample=True)))
         if level > 0 and up_Xs:
             cols.append((f"U{level}", class_counts(up_Xs[level - 1])))
 

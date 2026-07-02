@@ -20,7 +20,7 @@ unet_depth: 2
 first_ks: 3
 one_layers: 6
 features: 128
-epochs: 100                 # coarse scenes are cheap; train longer on the small set
+epochs: 80                 # coarse scenes are cheap; train longer on the small set
 
 n_classes: 8
 # Uniform class weights.  Inverse-frequency weighting (a segmentation habit) makes
@@ -28,7 +28,7 @@ n_classes: 8
 # under-produce the down-weighted common ones (Ground) — it skews the class
 # marginal away from the data.  For generation we want the true marginal, so 1s.
 # (void_weight, appended after these, stays the occupancy-calibration knob.)
-class_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+class_weight: [0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 lr: 0.0001
 batch_size: 8              # coarse dense scenes are tiny (~7k voxels) → larger batch
@@ -61,7 +61,7 @@ min_snr_gamma: 5.0
 # remove_mask keeps P(void) < 0.5 (tune via -occ_threshold).  void_weight scales
 # the (majority) void category in the CE: lower → more occupancy (0.5 ≈ the ~30%
 # data fraction), higher → prune harder.
-void_weight: 0.5
+void_weight: 1.2
 per_sigma_bins: 5
 
 diffusion_timesteps: 1000
