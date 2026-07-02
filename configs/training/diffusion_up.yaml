@@ -50,7 +50,7 @@ min_snr_gamma: 5.0
 # the pruning signal is weak.  With void under-weighted the model floods occupancy
 # to solid "lego blocks".  Start at 1.0 and tune with test/distribution_stats.py
 # so the fine occupancy fraction matches the data.
-void_weight: 1.8
+void_weight: 1.9
 per_sigma_bins: 5
 
 diffusion_timesteps: 1000

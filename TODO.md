@@ -1,6 +1,23 @@
 # TODO — D1 occupancy flood
 
-**Context.** D0: believable coarse layouts. D1 (`configs/training/diffusion_up.yaml`): floods occupancy — after `remove_mask(threshold=0.0)` nearly the whole subdivided grid survives ("lego blocks").
+**✅ RESOLVED (2026-07-02).** Root cause: `fill_upsampled_with_gt` left trilinear
+class mass on empty fine voxels → void-categorical target summed to 2
+(`test/target_rowsum_check.py`: empty rowsum 2.000) → CE optimum P(void)=0.5 →
+decoded mask≈0 → flood.  Fix: `zero_empty_target: true` (dataset zeros empty
+voxels → one-hot void, sum 1) + `ijk_to_index` guard in `fill_upsampled_with_gt`.
+After retrain (dales_1 02-07-11:09, void_weight 1.9): BCE floor 0.9→0.15; Val
+IoU/σ bin0→1.00; `d1_void_probe` P(void|void) 0.5→**0.995** (GT); occFrac diff
+0.93→**0.595** (≈gt 0.55); Δ occIoU −0.16→**−0.005** (on par, no longer degrades).
+D1 ≈ upsampler on IoU/acc is expected — a sampler can't beat the mean-regressor on
+those; its value is crispness, judged visually.
+
+**NEW ISSUE — object fragmentation.** D1 output is crisp but objects are
+*fragments*: jagged partial roofs / vegetation, no complete buildings or trees —
+the global-coherence limit of unconditional small-data generation.
+
+---
+
+**Original context.** D0: believable coarse layouts. D1 (`configs/training/diffusion_up.yaml`): floods occupancy — after `remove_mask(threshold=0.0)` nearly the whole subdivided grid survives ("lego blocks").
 
 **Scope.** Do not retrain D0. Use DALES WITH vegetation.
 

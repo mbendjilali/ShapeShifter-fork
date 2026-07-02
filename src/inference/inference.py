@@ -245,8 +245,8 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0, stage="D"):
             continue
 
         positions_np = positions.cpu().numpy()
-        features_np    = features.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
-        intensity    = features_np[:, 1]
+        features_np    = features.cpu().numpy()     # (V, 9): [intensity, class_probs(8)]
+        intensity    = features_np[:, 0]            # channel 3 of jdata (was [:,1] = P(ground))
         class_idx    = features_np[:, 1:].argmax(axis=-1)
 
         laz_path = os.path.join(out_dir, f'scene_{min_ind + ind}_{stage}_{level}.laz')
