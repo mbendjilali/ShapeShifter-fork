@@ -24,7 +24,12 @@ accumulate_steps: 1
 
 random_crop: false
 clip_size: null
-empty_fill: zero
+empty_fill: zero          # (level 0 only; unused at level>0 — kept for parity)
+# THE level>0 flood fix: zero empty fine voxels' features so the void-categorical
+# target is one-hot void (sum 1).  Without it, fill_upsampled_with_gt leaves
+# trilinear class mass on empties → target sums to 2 → CE optimum P(void)=0.5 →
+# decoded mask≈0 → occupancy floods.
+zero_empty_target: true
 
 dropout: 0.05
 time_emb: 128

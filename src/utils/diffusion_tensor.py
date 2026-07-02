@@ -70,7 +70,14 @@ class DiffusionTensor(fvdb.nn.VDBTensor):
         target_tensor.jdata[..., -1] = -1
         to_change_idx = target_tensor.grid.ijk_to_index(
             gt_fine_tensor.grid.ijk).jdata
-        target_tensor.data.jdata[to_change_idx] = gt_fine_tensor.jdata
+        # ijk_to_index returns -1 for fine-GT voxels absent from the subdivided
+        # coarse grid; without this guard those rows would silently overwrite the
+        # last voxel (jdata[-1]).  Keep only the valid matches.
+        valid = to_change_idx >= 0
+        if not bool(valid.all()):
+            print(f"[fill_upsampled_with_gt] warning: {int((~valid).sum())} fine-GT "
+                  f"voxels absent from subdivided coarse grid — dropped.")
+        target_tensor.data.jdata[to_change_idx[valid]] = gt_fine_tensor.jdata[valid]
         return DiffusionTensor.from_vdb(target_tensor)
 
     def clip(self):
