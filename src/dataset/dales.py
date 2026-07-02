@@ -60,6 +60,7 @@ class DALESDataset:
         clip_size: Optional[int] = None,
         random_crop: bool = False,
         empty_fill: str = 'blur',
+        zero_empty_target: bool = False,
     ):
         self.upsample_fac = upsample_fac
         self.base_resolution = base_resolution
@@ -67,6 +68,12 @@ class DALESDataset:
         # empty_fill='zero' makes empty (mask=-1) voxels neutral instead of
         # blurred-neighbour-filled, removing the train/inference mismatch (item 3).
         self.empty_fill = empty_fill
+        # zero_empty_target (level>0): fill_upsampled_with_gt leaves the trilinear
+        # class distribution on empty fine voxels, so the void-categorical target
+        # sums to 2 (class≈1 + void=1) → CE optimum P(void)=0.5 → decoded mask≈0 →
+        # occupancy floods.  When True, zero all channels of empty (mask<0) voxels
+        # so the target is one-hot void (sum 1), matching level 0's empty_fill=zero.
+        self.zero_empty_target = zero_empty_target
         # random_crop=True: level-0 windows are centered at a random *grid* location
         # (occupancy-agnostic), not a random occupied voxel — so borders / sparse
         # regions are seen and training matches the full-tile inference distribution
@@ -242,6 +249,14 @@ class DALESDataset:
         X0 = self._load_dt(self.gt_root / split / crop_id / f"{res_2}.pt", device)
         X_UP = X.trilinear_upsample(self.upsample_fac)
         X0   = DiffusionTensor.fill_upsampled_with_gt(X_UP, X0)
+        if self.zero_empty_target:
+            # Empty (mask<0) voxels keep trilinear class leftovers → categorical
+            # target sums to 2.  Zero every channel, then restore mask=-1, so the
+            # target is one-hot void (sum 1) — matching level 0.  Only the diffusion
+            # target is affected; the upsampler input X_UP is untouched.
+            empty = X0.data.jdata[:, -1] < 0
+            X0.data.jdata[empty] = 0.0
+            X0.data.jdata[empty, -1] = -1.0
         return X, X_UP, X0
 
     def sample_crop_ids(self, batch_size: int) -> List[str]:

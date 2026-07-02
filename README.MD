@@ -152,7 +152,8 @@ CUDA_VISIBLE_DEVICES=0 python src/inference/inference.py \
 ```
 
 Outputs in `output/dales/`:
-- `gen_{i}_{level}.laz` — point cloud at each pyramid level, coloured by semantic class
+- `scene_{i}_D_{level}.laz` — diffusion result at each pyramid level
+- `scene_{i}_U_{level}.laz` — upsampler-only result (levels ≥ 1)
 - `gen_{i}_{level}.pt` — raw DiffusionTensor (for downstream use)
 
 ## Diagnostics

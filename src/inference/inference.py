@@ -158,18 +158,22 @@ def compute_all_generations_dales(
     del diffusion0
     torch.cuda.empty_cache()
     generated_Xs = [generated_X]
+    upsampler_Xs = []
     if verbose:
         print('LEVEL 0: {:.1f}s'.format(time.time() - t0))
 
     for i in range(1, max_level + 1):
-        generated_X = generate_level_dales(generated_X, i, src, ddim_steps, verbose,
-                                           target_class=target_class,
-                                           occ_threshold=occ_threshold)
+        generated_X, upsampled_X = generate_level_dales(
+            generated_X, i, src, ddim_steps, verbose,
+            target_class=target_class,
+            occ_threshold=occ_threshold,
+        )
         # move previous level off GPU before accumulating the new one
         generated_Xs[-1] = generated_Xs[-1].cpu()
+        upsampler_Xs.append(upsampled_X)
         generated_Xs.append(generated_X)
 
-    return generated_Xs
+    return generated_Xs, upsampler_Xs
 
 
 def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False,
@@ -182,15 +186,17 @@ def generate_level_dales(generated_X, level, src, ddim_steps=None, verbose=False
     if target_class is not None:
         generated_X = diffusion.ddpm_sample_class_clamp(new_XT, target_class)
     elif ddim_steps is None:
-        generated_X = diffusion.ddpm_sample(new_XT)
+        # pass X_BLUR so the reverse blends toward the upsampler estimate (SR3-style)
+        generated_X = diffusion.ddpm_sample(new_XT, X_Blur=X_BLUR)
     else:
         generated_X = diffusion.ddim_sample(new_XT, steps=diffusion.max_T // ddim_steps)
     if verbose:
         print('LEVEL {}: {:.1f}s'.format(level, time.time() - t0))
-    result = DiffusionTensor.from_vdb(generated_X).remove_mask(threshold=occ_threshold)
+    diffusion_result = DiffusionTensor.from_vdb(generated_X).remove_mask(threshold=occ_threshold)
+    upsampler_result = DiffusionTensor.from_vdb(X_BLUR).remove_mask(threshold=occ_threshold)
     del diffusion
     torch.cuda.empty_cache()
-    return result
+    return diffusion_result, upsampler_result
 
 
 def generate_input(generated_X, diffusion):
@@ -220,10 +226,12 @@ def export_to_laz(positions, intensity, class_idx, save_path):
 
     las.write(save_path)
 
-def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
+def save_dales_pc(generated_X, out_dir, level=0, min_ind=0, stage="D"):
     """
     Export a DALES generation batch as LAZ, coloured by semantic class.
 
+    Filenames: ``scene_{outputID}_{stage}_{level}.laz`` where stage is ``D``
+    (diffusion) or ``U`` (upsampler).
     """
     for ind in range(generated_X.grid_count):
         g = DiffusionTensor(
@@ -233,15 +241,15 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
         positions, features, _ = DiffusionTensor.get_feature_data(g.jdata)
 
         if len(positions) == 0:
-            print(f'  sample {min_ind + ind} level {level}: void — skipped')
+            print(f'  sample {min_ind + ind} {stage}{level}: void — skipped')
             continue
 
         positions_np = positions.cpu().numpy()
-        features_np    = features.cpu().numpy()     # (V, 10): [intensity, class_probs(8)]
-        intensity    = features_np[:, 1]
+        features_np    = features.cpu().numpy()     # (V, 9): [intensity, class_probs(8)]
+        intensity    = features_np[:, 0]            # channel 3 of jdata (was [:,1] = P(ground))
         class_idx    = features_np[:, 1:].argmax(axis=-1)
 
-        laz_path = os.path.join(out_dir, f'gen_{min_ind + ind}_{level}.laz')
+        laz_path = os.path.join(out_dir, f'scene_{min_ind + ind}_{stage}_{level}.laz')
         export_to_laz(positions_np, intensity, class_idx, save_path=laz_path)
 
 
@@ -364,7 +372,7 @@ if __name__ == '__main__':
         min_ind = batch_i * args.batch_size
         t0 = time.time()
         with torch.no_grad():
-            GX = compute_all_generations_dales(
+            GX, UX = compute_all_generations_dales(
                 src=SRC,
                 nx=args.base_res,
                 voxel_size=args.voxel_size,
@@ -379,4 +387,6 @@ if __name__ == '__main__':
         print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving LAZs …')
         for level_i, g in enumerate(GX):
             torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
-            save_dales_pc(g, OUT, level=level_i, min_ind=min_ind)
+            save_dales_pc(g, OUT, level=level_i, min_ind=min_ind, stage="D")
+        for level_i, u in enumerate(UX, start=1):
+            save_dales_pc(u, OUT, level=level_i, min_ind=min_ind, stage="U")

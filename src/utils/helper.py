@@ -4,7 +4,7 @@ from fvdb_diffusion import log_snr_to_alpha_sigma, log   # your module-level fns
 
 
 @torch.no_grad()
-def reverse_from(diff, noisy_grid, t_start, steps=None, clamp_onehot=None):
+def reverse_from(diff, noisy_grid, t_start, steps=None, clamp_onehot=None, X_Blur=None):
     dev = diff.device
     cs, ce = 4, 4 + diff.n_classes
     steps = steps or max(2, int(round(t_start * diff.timesteps)) + 1)
@@ -20,11 +20,17 @@ def reverse_from(diff, noisy_grid, t_start, steps=None, clamp_onehot=None):
             if clamp_onehot is not None:
                 x_start.data.jdata[:, cs:ce] = clamp_onehot
             return x_start
+        # blend the x0 estimate toward the upsampler output (level>0 refinement)
+        if X_Blur is not None:
+            g = diff.blend_gamma(time_next)
+            start_data = (1 - g[:, None]) * x_start.jdata + g[:, None] * X_Blur.jdata
+        else:
+            start_data = x_start.jdata
         ls, lsn = diff.log_snr(time), diff.log_snr(time_next)
         a, sg   = log_snr_to_alpha_sigma(ls)
         an, sgn = log_snr_to_alpha_sigma(lsn)
         c = -expm1(ls - lsn)
-        mean = an * (noisy_grid.jdata * (1 - c) / a + c * x_start.jdata)
+        mean = an * (noisy_grid.jdata * (1 - c) / a + c * start_data)
         var  = (sgn**2) * c
         noisy_grid.data.jdata = mean + (0.5*log(var)).exp() * torch.randn_like(noisy_grid.jdata)
     return noisy_grid

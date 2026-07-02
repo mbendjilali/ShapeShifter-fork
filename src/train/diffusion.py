@@ -114,6 +114,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
 
     random_crop = cfg.get("random_crop", False) and args.level == 0
     empty_fill = cfg.get("empty_fill", "blur")
+    zero_empty_target = cfg.get("zero_empty_target", False)
     dataset = DALESDataset(manifest,
                            split="train",
                            upsample_fac=cfg["upsample_fac"],
@@ -121,7 +122,8 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                            level=args.level,
                            clip_size=clip_size,
                            random_crop=random_crop,
-                           empty_fill=empty_fill)
+                           empty_fill=empty_fill,
+                           zero_empty_target=zero_empty_target)
 
     val_dataset = DALESDataset.test_set(manifest,
                                         upsample_fac=cfg["upsample_fac"],
@@ -129,7 +131,8 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                                         level=args.level,
                                         clip_size=clip_size,
                                         random_crop=random_crop,
-                                        empty_fill=empty_fill)
+                                        empty_fill=empty_fill,
+                                        zero_empty_target=zero_empty_target)
 
     if world_size > 1 and rank == 0:
         dist.barrier()

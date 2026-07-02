@@ -11,10 +11,12 @@ unet_depth: 2
 first_ks: 3
 one_layers: 6
 features: 128
-epochs: 80
+epochs: 50
 
 n_classes: 8
-class_weight: [0.5, 0.5, 1.52, 2.0, 0.57, 1.67, 1.35, 0.5]
+# Uniform (see diffusion_0.yaml): inverse-frequency weighting skews the generative
+# class marginal toward rare classes.
+class_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 lr: 0.0001
 batch_size: 8
@@ -22,7 +24,12 @@ accumulate_steps: 1
 
 random_crop: false
 clip_size: null
-empty_fill: zero
+empty_fill: zero          # (level 0 only; unused at level>0 — kept for parity)
+# THE level>0 flood fix: zero empty fine voxels' features so the void-categorical
+# target is one-hot void (sum 1).  Without it, fill_upsampled_with_gt leaves
+# trilinear class mass on empties → target sums to 2 → CE optimum P(void)=0.5 →
+# decoded mask≈0 → occupancy floods.
+zero_empty_target: true
 
 dropout: 0.05
 time_emb: 128
@@ -38,7 +45,12 @@ p2_gamma: 1.0
 min_snr_gamma: 5.0
 
 
-void_weight: 0.5
+# Higher void_weight than level 0 (0.5): level>0 runs on the *subdivided coarse
+# grid*, already pruned to the coarse structure, so void is a smaller fraction and
+# the pruning signal is weak.  With void under-weighted the model floods occupancy
+# to solid "lego blocks".  Start at 1.0 and tune with test/distribution_stats.py
+# so the fine occupancy fraction matches the data.
+void_weight: 1.9
 per_sigma_bins: 5
 
 diffusion_timesteps: 1000
