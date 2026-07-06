@@ -148,7 +148,7 @@ def compute_all_generations_dales(
     voxel_size=LEVEL0_VOXEL_SIZE,
     max_level=4,
     eval_batch_size=5,
-    features=13,
+    features=12,
     ddim_steps=None,
     verbose=False,
     nz=LEVEL0_NZ,
@@ -275,7 +275,7 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0):
 
 def diagnose_occupancy_dales(
     src, out_dir, nx=LEVEL0_NX, voxel_size=LEVEL0_VOXEL_SIZE, nz=LEVEL0_NZ,
-    eval_batch_size=1, features=13,
+    eval_batch_size=1, features=12,
     ddim_steps=None, thresholds=(-0.5, 0.0, 0.3, 0.6, 0.85),
 ):
     """Read-only occupancy diagnostic for the level-0 model (review #1).

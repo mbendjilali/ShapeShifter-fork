@@ -1,5 +1,5 @@
-dales_root: /path/to/dales_2
-gt_root: data/dales
+dales_root: /data/moussabendjilali/archive/data/dales_2
+gt_root: data_no_veg
 
 voxel_size_levels:
   "256": 0.4
@@ -10,13 +10,12 @@ ground_class: 1
 
 classes:
   "1": Ground
-  "2": Vegetation
-  "3": Cars
-  "4": Trucks
-  "5": PowerLines
-  "6": Fences
-  "7": Poles
-  "8": Buildings
+  "2": Cars
+  "3": Trucks
+  "4": PowerLines
+  "5": Fences
+  "6": Poles
+  "7": Buildings
 
 sampling_ratio: 1.0
 common_sampling_ratio: 1.0

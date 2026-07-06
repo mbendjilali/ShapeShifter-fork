@@ -76,6 +76,15 @@ def load_dales_laz(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     xyz = np.stack([x, y, z], axis=-1)
     sem = np.asarray(las.legacy_semantic[:], dtype=np.uint8)
     intensity = np.asarray(las.intensity[:], dtype=np.float32) / 65535.0
+
+    keep = sem != 2
+
+    xyz = xyz[keep]
+    sem = sem[keep]
+    intensity = intensity[keep]
+    remap = {1:1, 3:2, 4:3, 5:4, 6:5, 7:6, 8:7}
+    sem = np.array([remap[s] for s in sem], dtype=np.uint8)
+
     return xyz, sem, intensity
 
 # ---------------------------------------------------------------------------
@@ -309,7 +318,7 @@ def encode_tile_as_crops_augmented(
     cfg,
     laz_path:   Path,
     out_root:   Path,
-    yaw_angles: List[float] = (0, 45, 90, 135, 180, 225, 270, 315),
+    yaw_angles: List[float] = (45, 90, 180),
     flip_axes:  List[int]   = (0, 1),
     verbose:    bool  = False,
 ) -> None:
@@ -371,7 +380,7 @@ def export_ply(dt: DiffusionTensor, out_path: Path) -> None:
     positions, features, _ = DiffusionTensor.get_feature_data(g.jdata)
     positions   = positions.cpu().detach().numpy()
     class_probs = features[:, 1:].cpu().detach().numpy()
-    class_idx   = class_probs.argmax(axis=-1).clip(0, 7)
+    class_idx   = class_probs.argmax(axis=-1).clip(0, 6)
     rgb         = class_idx[:, None].repeat(3, axis=1).astype(np.float32) / 7.0
     normals_n   = np.zeros_like(positions)
 

@@ -152,6 +152,108 @@ def run_test_B(
 
 
 # ---------------------------------------------------------------------------
+# Test C — hide voxels, add noise, denoise, compare to original
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def run_test_C(
+    diff,
+    crop_path: str,
+    level: int,
+    pyramid_res: int,
+    t: float,
+    hide_fraction: float,
+    out_dir: str,
+) -> None:
+    """Hide a spatial region of voxels, add noise, denoise, compare to original.
+
+    The experiment asks: can the diffusion model reconstruct information that was
+    deliberately removed from a crop?
+
+    Steps
+    -----
+    1. Load the clean crop from disk and densify it (matching training distribution).
+    2. Select voxels in the first ``hide_fraction`` of the X-axis range and mark
+       them as empty (features = 0, mask = -1).  The rest of the crop is kept clean.
+    3. Add Gaussian noise at level ``t`` to the whole (now partially-holed) grid.
+    4. Run the reverse diffusion process from ``t`` → 0 to reconstruct.
+    5. Export three .laz files so you can compare side-by-side in a viewer:
+         original.laz             — ground truth (no hiding)
+         hidden.laz               — crop with the region removed  (the "hole")
+         recon_hX.X_tY.YY.laz    — model's reconstruction
+    """
+    resolution = pyramid_res * (2 ** level)
+    pt_file = Path(crop_path) / f"{resolution}.pt"
+    if not pt_file.exists():
+        raise FileNotFoundError(
+            f"Crop file not found: {pt_file}\n"
+            f"  Expected resolution {resolution} for level {level} (pyramid_res={pyramid_res})."
+        )
+
+    print(f"[test_C] Loading {pt_file}")
+    obj = torch.load(pt_file, weights_only=False)
+    if not isinstance(obj, DiffusionTensor):
+        obj = DiffusionTensor(obj.grid, obj.data)
+    X_sparse = DiffusionTensor(obj.grid.to(diff.device), obj.data.to(diff.device))
+
+    # Densify to a regular bbox grid — empty slots get mask = -1, features = 0.
+    # empty_fill='zero' matches how the model was trained (no blurred neighbours
+    # leaking into the empty slots, so the distribution at inference is consistent).
+    X_dense = X_sparse.to_custom_dense(empty_fill='zero')
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Export the original (only truly occupied voxels, for reference)
+    orig_path = os.path.join(out_dir, "original.laz")
+    _export_dt(X_sparse.get_global().remove_mask(), orig_path)
+    print(f"  Exported original          → {orig_path}")
+
+    # ------------------------------------------------------------------
+    # Define the hidden region: voxels in the first hide_fraction of X
+    # ------------------------------------------------------------------
+    ijk = X_dense.grid.ijk.jdata          # (N_voxels, 3)  integer voxel coords
+    i_min = ijk[:, 0].min().item()
+    i_max = ijk[:, 0].max().item()
+    i_split = i_min + int(round((i_max - i_min) * hide_fraction))
+    hidden_mask = ijk[:, 0] <= i_split    # True for voxels to be erased
+
+    n_hidden = int(hidden_mask.sum())
+    print(f"  Hiding {n_hidden}/{ijk.shape[0]} voxels  "
+          f"(X ∈ [{i_min}, {i_split}], fraction={hide_fraction:.2f})")
+
+    # Zero all feature channels and flip mask to -1 for the hidden voxels
+    X_holed_data = X_dense.jdata.clone()
+    X_holed_data[hidden_mask, :-1] = 0.0   # zero offset, intensity, class_probs
+    X_holed_data[hidden_mask,  -1] = -1.0  # mark as empty
+    X_holed = DiffusionTensor(X_dense.grid, X_dense.grid.jagged_like(X_holed_data))
+
+    # Export the "holed" crop (only the surviving occupied voxels)
+    hidden_path = os.path.join(out_dir, "hidden.laz")
+    _export_dt(X_holed.get_global().remove_mask(), hidden_path)
+    print(f"  Exported holed input       → {hidden_path}")
+
+    # ------------------------------------------------------------------
+    # Add noise at level t to the whole grid (occupied + empty slots)
+    # ------------------------------------------------------------------
+    tt = torch.full((X_holed.jdata.shape[0],), t, device=diff.device)
+    noisy, _ = diff.q_sample(X_holed, tt)
+
+    # ------------------------------------------------------------------
+    # Denoise: iterate from t → 0
+    # ------------------------------------------------------------------
+    t0 = time.time()
+    recon_vdb = reverse_from(diff, noisy, t_start=t)
+    recon = DiffusionTensor.from_vdb(recon_vdb).get_global().remove_mask()
+
+    out_path = os.path.join(out_dir, f"recon_h{hide_fraction:.1f}_t{t:.2f}.laz")
+    _export_dt(recon, out_path)
+    print(
+        f"  Reconstruction: pts={recon.jdata.shape[0]}  "
+        f"{time.time()-t0:.1f}s  → {out_path}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -161,8 +263,8 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--test", choices=["A", "B", "AB"], default="AB",
-        help="Which test(s) to run. A=reconstruct, B=class-gen, AB=both.",
+        "--test", choices=["A", "B", "AB", "C"], default="AB",
+        help="Which test(s) to run. A=reconstruct, B=class-gen, AB=both, C=hide-and-reconstruct.",
     )
     p.add_argument(
         "--level", type=int, default=0,
@@ -215,6 +317,17 @@ def parse_args():
     b_group.add_argument(
         "--seed", type=int, default=0,
         help="Random seed for test_B.",
+    )
+
+    # --- test_C ---
+    c_group = p.add_argument_group("test_C options")
+    c_group.add_argument(
+        "--hide_fraction", type=float, default=0.5,
+        help=(
+            "Fraction (0.0–1.0) of the X-axis range to hide for test_C. "
+            "0.5 hides the first half of the crop; the model must reconstruct it. "
+            "Uses --crop / --split / --level / --t_list[0] from shared args."
+        ),
     )
 
     # --- grid shape (shared) ---
@@ -308,6 +421,33 @@ def main():
                 args.class_ids, args.seed, out_dir,
             )
             print(f"\nDone. Results written to: {out_dir}")
+
+    if args.test in ("C",):
+        out_dir = args.out or f"output/tests/level{args.level}"
+        print(f"Loading level-{args.level} model …")
+        diff = load_dales_diffusion(args.level, args.src)
+        diff.eval()
+        print(
+            f"  n_classes={diff.n_classes}  "
+            f"timesteps={diff.timesteps}  "
+            f"max_T={diff.max_T}"
+        )
+        if args.crop is None:
+            raise ValueError("--crop is required for test C.")
+        crop_path = resolve_crop_path(args.crop, args.split)
+        t = args.t_list[0]
+        print(f"\n{'='*60}")
+        print(f"Test C — hide voxels, denoise, reconstruct")
+        print(f"  level         : {args.level}")
+        print(f"  crop          : {crop_path}")
+        print(f"  hide_fraction : {args.hide_fraction}")
+        print(f"  t             : {t}")
+        print(f"{'='*60}")
+        run_test_C(
+            diff, crop_path, args.level, args.pyramid_res,
+            t, args.hide_fraction, out_dir,
+        )
+        print(f"\nDone. Results written to: {out_dir}")
 
 
 if __name__ == "__main__":

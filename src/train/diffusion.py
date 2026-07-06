@@ -285,8 +285,11 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                                 with torch.no_grad():
                                     X0_BLUR = model_upsampler(X, X_UP).detach()
                                 X0_BLUR.grid = X0.grid
-                                x0c, bc = clip_data_per_element(
-                                    X0, X0_BLUR, cfg["clip_size"])
+                                clip_size = cfg.get("clip_size")
+                                if clip_size is not None:
+                                    x0c, bc = clip_data_per_element(X0, X0_BLUR, clip_size)
+                                else:
+                                    x0c, bc = X0, X0_BLUR
                                 mse_loss, bce_loss, _, _, occ_iou, metrics = diffusion_ddp(x0c, bc)
 
                             loss = (mse_loss + bce_loss) / accumulate_steps
