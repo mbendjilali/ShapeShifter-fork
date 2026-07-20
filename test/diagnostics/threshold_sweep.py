@@ -7,20 +7,23 @@ data value, Vegetation's excess melts and Buildings/rare recover, then the
 semantic skew rides on the spurious over-generated (low-confidence) voxels —
 fixing occupancy fixes most of the semantics.
 
-    python test/threshold_sweep.py
+    python test/diagnostics/threshold_sweep.py
 """
 import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from common import get_device, CLASS_NAMES
+from common import get_device, data_stats, CLASS_NAMES, N_CLS
 from utils.fvdb_utils import grid_to_VDB
 from utils.diffusion_tensor import DiffusionTensor
 from inference.inference import (
     load_dales_diffusion, compute_canonical_base_grid,
     LEVEL0_NX, LEVEL0_NZ, LEVEL0_VOXEL_SIZE,
 )
-from distribution_stats import data_stats, N_CLS
 
 
 def _row(fracs):

@@ -12,17 +12,22 @@ Reading it:
   * both separate ⇒ the single-step head is fine; the flood is in the reverse
     trajectory / decode.
 
-    python test/d1_void_probe.py --level 1 --n_crops 12
+    python test/diagnostics/d1_void_probe.py --level 1 --n_crops 12
 """
 import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
 
-from common import get_device, list_crops
+from common import (
+    get_device, list_crops, has_levels, load_levelN_inputs, level_resolutions,
+)
 from utils.diffusion_tensor import DiffusionTensor
 from inference.inference import load_dales_diffusion
-from upsampler_vs_diffusion import load_levelN_inputs
 
 
 @torch.no_grad()
@@ -31,8 +36,7 @@ def probe(diff, crops, res1, res2, upsample_fac, ts, device):
     # accumulators: (source, t) -> [sum P(void|void), sum P(void|occ), sum occ_frac, n]
     acc = {}
     for cp in crops:
-        import os
-        if not (os.path.exists(f"{cp}/{res1}.pt") and os.path.exists(f"{cp}/{res2}.pt")):
+        if not has_levels(cp, res1, res2):
             continue
         X, X_UP, X0 = load_levelN_inputs(cp, res1, res2, upsample_fac, device)
         gt_void = X0.jdata[:, -1] <= 0
@@ -69,8 +73,7 @@ def main():
     args = p.parse_args()
     device = get_device()
 
-    res1 = args.base_res * (args.upsample_fac ** (args.level - 1))
-    res2 = args.upsample_fac * res1
+    res1, res2 = level_resolutions(args.level, args.base_res, args.upsample_fac)
     diff = load_dales_diffusion(args.level, args.src)
     diff.eval()
     assert diff.model_upsampler is not None

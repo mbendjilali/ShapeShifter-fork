@@ -19,35 +19,26 @@ Reading it:
     (or the upsampler is the bottleneck).  Semantic accuracy may still improve,
     which is the low-noise refinement diff-N is meant for.
 
-    python test/upsampler_vs_diffusion.py --level 1 --n_crops 16
-    python test/upsampler_vs_diffusion.py --level 1 --n_crops 8 --steps 60   # faster
+    python test/evaluation/upsampler_vs_diffusion.py --level 1 --n_crops 16
+    python test/evaluation/upsampler_vs_diffusion.py --level 1 --n_crops 8 --steps 60
 """
 import argparse
 import os
+import statistics as st
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from common import get_device, list_crops, occ_iou
+from common import (
+    get_device, list_crops, occ_iou, has_levels, load_levelN_inputs,
+    level_resolutions,
+)
 from utils.diffusion_tensor import DiffusionTensor
 from utils.helper import reverse_from
 from inference.inference import load_dales_diffusion
-
-
-def _load_dt(path: str, device: str) -> DiffusionTensor:
-    o = torch.load(path, weights_only=False)
-    if not isinstance(o, DiffusionTensor):
-        o = DiffusionTensor(o.grid, o.data)
-    return DiffusionTensor(o.grid.to(device), o.data.to(device))
-
-
-def load_levelN_inputs(crop_path, res1, res2, upsample_fac, device):
-    """Reproduce DALESDataset.load_crop_levelN for one crop, no dataset object."""
-    X = _load_dt(os.path.join(crop_path, f"{res1}.pt"), device)
-    X0_fine = _load_dt(os.path.join(crop_path, f"{res2}.pt"), device)
-    X_UP = X.trilinear_upsample(upsample_fac)
-    X0 = DiffusionTensor.fill_upsampled_with_gt(X_UP, X0_fine)
-    return X, X_UP, X0
 
 
 @torch.no_grad()
@@ -56,11 +47,8 @@ def evaluate(diff, crops, res1, res2, upsample_fac, threshold, steps, device):
     t_start = diff.max_T / diff.timesteps
     rows = []
     for cp in crops:
-        f1 = os.path.join(cp, f"{res1}.pt")
-        f2 = os.path.join(cp, f"{res2}.pt")
-        if not (os.path.exists(f1) and os.path.exists(f2)):
+        if not has_levels(cp, res1, res2):
             continue
-        t0 = time.time()
         X, X_UP, X0 = load_levelN_inputs(cp, res1, res2, upsample_fac, device)
 
         gt_occ = X0.jdata[:, -1] > 0
@@ -117,8 +105,7 @@ def main():
 
     assert args.level > 0, "This test compares against the upsampler; use level > 0."
     device = get_device()
-    res1 = args.base_res * (args.upsample_fac ** (args.level - 1))
-    res2 = args.upsample_fac * res1
+    res1, res2 = level_resolutions(args.level, args.base_res, args.upsample_fac)
 
     print(f"Loading level-{args.level} diffusion (+ upsampler) from {args.src} …")
     diff = load_dales_diffusion(args.level, args.src)
@@ -134,7 +121,6 @@ def main():
         print("No usable crops found.")
         return
 
-    import statistics as st
     iou_up = st.mean(r[1] for r in rows)
     iou_d = st.mean(r[2] for r in rows)
     acc_up = st.mean(r[3] for r in rows)

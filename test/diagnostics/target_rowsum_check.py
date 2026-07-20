@@ -7,17 +7,17 @@ empty voxels is [trilinear_class (≈sum 1), void=1] → row sum ≈ 2, which br
 categorical (optimum P(void)=0.5 → decoded mask≈0 → floods at the pruning
 threshold).  This checks the row sums, split by occupied/empty.
 
-    python test/target_rowsum_check.py --level 1 --n_crops 8
+    python test/diagnostics/target_rowsum_check.py --level 1 --n_crops 8
 """
 import argparse
 import os
+import sys
 
-import torch
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common import get_device, list_crops
-from upsampler_vs_diffusion import load_levelN_inputs
-
-N_CLS = 8
+from common import (
+    get_device, list_crops, has_levels, load_levelN_inputs, level_resolutions, N_CLS,
+)
 
 
 def main():
@@ -30,13 +30,12 @@ def main():
     p.add_argument("--upsample_fac", type=int, default=2)
     args = p.parse_args()
     device = get_device()
-    res1 = args.base_res * (args.upsample_fac ** (args.level - 1))
-    res2 = args.upsample_fac * res1
+    res1, res2 = level_resolutions(args.level, args.base_res, args.upsample_fac)
 
     occ_sum = occ_n = emp_sum = emp_n = 0.0
     emp_classmass = 0.0
     for cp in list_crops(args.split, n=args.n_crops):
-        if not (os.path.exists(f"{cp}/{res1}.pt") and os.path.exists(f"{cp}/{res2}.pt")):
+        if not has_levels(cp, res1, res2):
             continue
         _, _, X0 = load_levelN_inputs(cp, res1, res2, args.upsample_fac, device)
         occ = X0.jdata[:, -1] > 0

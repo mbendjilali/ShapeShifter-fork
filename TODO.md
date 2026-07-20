@@ -2,7 +2,7 @@
 
 **✅ RESOLVED (2026-07-02).** Root cause: `fill_upsampled_with_gt` left trilinear
 class mass on empty fine voxels → void-categorical target summed to 2
-(`test/target_rowsum_check.py`: empty rowsum 2.000) → CE optimum P(void)=0.5 →
+(`test/diagnostics/target_rowsum_check.py`: empty rowsum 2.000) → CE optimum P(void)=0.5 →
 decoded mask≈0 → flood.  Fix: `zero_empty_target: true` (dataset zeros empty
 voxels → one-hot void, sum 1) + `ijk_to_index` guard in `fill_upsampled_with_gt`.
 After retrain (dales_1 02-07-11:09, void_weight 1.9): BCE floor 0.9→0.15; Val
@@ -59,7 +59,7 @@ the global-coherence limit of unconditional small-data generation.
 7. **Retrain L1:** `python src/train/diffusion.py -level 1 -config configs/training/diffusion_up.yaml -dataset dales`
    - Watch `OccIoU_per_sigma` bin0 → ~0.95+ in few epochs. Noisy bins staying poor is OK.
 
-8. **Inference:** `inference.py -levels 1 -batch_size 4 -total_num 4`; then `test/distribution_stats.py --n_gen 8 --max_level 1` and `test/upsampler_vs_diffusion.py`.
+8. **Inference:** `inference.py -levels 1 -batch_size 4 -total_num 4`; then `test/evaluation/distribution_stats.py --n_gen 8 --max_level 1` and `test/evaluation/upsampler_vs_diffusion.py`.
    - Accept: fine occupancy not ≈100%; D1 occupied fraction ≈ data (ratio = occupied fine GT ÷ subdivided coarse GT voxels — **not** `distribution_stats.py` dense `d_frac` at res 32, which is crop bbox).
    - Visual: LAZ L1 refined layout, not solidified.
 

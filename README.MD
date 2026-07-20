@@ -158,9 +158,14 @@ Outputs in `output/dales/`:
 
 ## Diagnostics
 
+Standalone scripts live under `test/`, grouped by purpose — `generation/` (writes
+`.laz` to eyeball), `evaluation/` (numbers vs data or baseline), `diagnostics/`
+(root-cause probes). See [test/README.md](test/README.md) for the full index.
+
 Quick checkpoint checks (reconstruction + class-conditional sampling):
 
 ```shell
-python src/run_tests.py --test AB --level 0 \
-    --crop 5080_54435_x0000_y0050 --split test --class_ids 7
+python test/generation/reconstruct.py --level 0 \
+    --crop 5080_54435_x0000_y0050 --split test
+python test/generation/class_generation.py --levels 0 --class_ids 7
 ```

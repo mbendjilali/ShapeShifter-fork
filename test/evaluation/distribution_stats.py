@@ -10,58 +10,18 @@ A healthy generator matches the data column. After switching class_weight to
 uniform, the generated class fractions should move toward the data; after tuning
 void_weight per level, the occupancy fractions should match.
 
-    python test/distribution_stats.py --n_gen 8 --n_data 64 --max_level 1
+    python test/evaluation/distribution_stats.py --n_gen 8 --n_data 64 --max_level 1
 """
 import argparse
 import os
+import sys
 
-import numpy as np
-import torch
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common import get_device, list_crops, CLASS_NAMES
-from utils.diffusion_tensor import DiffusionTensor
+from common import get_device, class_counts, data_stats, CLASS_NAMES, N_CLS
 from inference.inference import (
     compute_all_generations_dales, LEVEL0_NX, LEVEL0_NZ, LEVEL0_VOXEL_SIZE,
 )
-
-N_CLS = 8
-
-
-def class_counts(dt, sample=False):
-    """Per-class counts over occupied voxels. sample=True draws class ~ softmax
-    (reproduces the marginal); sample=False uses argmax (mode → majority bias)."""
-    if dt.jdata.shape[0] == 0:
-        return np.zeros(N_CLS, dtype=np.int64)
-    probs = dt.jdata[:, 4:4 + N_CLS]
-    if sample:
-        p = probs.clamp(min=0)
-        p = p / p.sum(-1, keepdim=True).clamp(min=1e-9)
-        cls = torch.multinomial(p, 1).squeeze(-1).cpu().numpy()
-    else:
-        cls = probs.argmax(-1).cpu().numpy()
-    return np.bincount(cls, minlength=N_CLS)
-
-
-def data_stats(split, res, n_data, device):
-    """Per-class counts (over occupied voxels) and occupancy fraction from real crops."""
-    counts = np.zeros(N_CLS, dtype=np.int64)
-    occ_num = occ_den = used = 0
-    for cp in list_crops(split):
-        f = os.path.join(cp, f"{res}.pt")
-        if not os.path.exists(f):
-            continue
-        o = torch.load(f, weights_only=False)
-        if not isinstance(o, DiffusionTensor):
-            o = DiffusionTensor(o.grid, o.data)
-        dt = DiffusionTensor(o.grid.to(device), o.data.to(device))
-        counts += class_counts(dt)
-        dense = dt.to_custom_dense(empty_fill='zero')          # add empty voxels
-        occ_num += int((dense.jdata[:, -1] > 0).sum())
-        occ_den += dense.jdata.shape[0]
-        used += 1
-        if used >= n_data:
-            break
-    return counts, (occ_num / max(occ_den, 1)), used
 
 
 def print_hist(title, columns):
@@ -117,7 +77,8 @@ def main():
                   f"(D0≫data ⇒ over-generating; ≪ ⇒ under)")
         else:
             print(f"\n  occupancy fraction (data, dense {res}.pt): {d_frac:.3f}   "
-                  f"(compare D{level} vs upsampler with test/upsampler_vs_diffusion.py)")
+                  f"(compare D{level} vs upsampler with "
+                  f"test/evaluation/upsampler_vs_diffusion.py)")
     print(f"\n{'='*64}")
 
 

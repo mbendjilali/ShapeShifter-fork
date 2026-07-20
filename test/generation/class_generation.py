@@ -1,20 +1,23 @@
-"""Class-conditional generation from noise (was run_tests.py test B).
+"""Class-conditional generation from noise.
 
 Generates from pure noise on the canonical grid with the class channel clamped to
 each target class throughout sampling, then exports → clamp_class{cid}.laz.
 Diagnostic for "does the model know what class-X geometry looks like".
 
-    python test/class_generation.py --levels 0 --class_ids 7
-    python test/class_generation.py --levels 0 --class_ids 0 7 --seed 1
+    python test/generation/class_generation.py --levels 0 --class_ids 7
+    python test/generation/class_generation.py --levels 0 --class_ids 0 7 --seed 1
 """
 import argparse
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import fvdb.nn as fvnn
 
-from common import get_device, export_dt, CLASS_NAMES
+from common import export_dt, CLASS_NAMES
 from utils.diffusion_tensor import DiffusionTensor
 from utils.helper import reverse_from
 from inference.inference import (

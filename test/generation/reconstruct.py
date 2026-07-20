@@ -1,20 +1,22 @@
-"""Noise-then-denoise reconstruction of a real crop (was run_tests.py test A).
+"""Noise-then-denoise reconstruction of a real crop.
 
 Adds noise at each t in --t_list to a held-out crop, reverse-denoises with the
 level's diffusion, and exports the result → recon_t{t}.laz.  A sanity check that
 the denoiser recovers the crop from a given noise level.
 
-    python test/reconstruct.py --level 0 --crop 5080_54435_x0000_y0050
-    python test/reconstruct.py --level 0 --crop <id> --t_list 0.3 0.6 1.0
+    python test/generation/reconstruct.py --level 0 --crop 5080_54435_x0000_y0050
+    python test/generation/reconstruct.py --level 0 --crop <id> --t_list 0.3 0.6 1.0
 """
 import argparse
 import os
+import sys
 import time
-from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from common import get_device, resolve_crop_path, export_dt
+from common import crop_pt, load_dt, resolve_crop_path, export_dt
 from utils.diffusion_tensor import DiffusionTensor
 from utils.helper import reverse_from
 from inference.inference import load_dales_diffusion, LEVEL0_PYRAMID_RES
@@ -23,16 +25,13 @@ from inference.inference import load_dales_diffusion, LEVEL0_PYRAMID_RES
 @torch.no_grad()
 def run(diff, crop_path, level, pyramid_res, t_list, out_dir):
     resolution = pyramid_res * (2 ** level)
-    pt_file = Path(crop_path) / f"{resolution}.pt"
-    if not pt_file.exists():
+    pt_file = crop_pt(crop_path, resolution)
+    if not os.path.exists(pt_file):
         raise FileNotFoundError(
             f"Crop file not found: {pt_file} (resolution {resolution} for level {level}).")
 
     print(f"[reconstruct] loading {pt_file}")
-    obj = torch.load(pt_file, weights_only=False)
-    if not isinstance(obj, DiffusionTensor):
-        obj = DiffusionTensor(obj.grid, obj.data)
-    X_clean = DiffusionTensor(obj.grid.to(diff.device), obj.data.to(diff.device))
+    X_clean = load_dt(pt_file, diff.device)
 
     os.makedirs(out_dir, exist_ok=True)
     for t in t_list:
