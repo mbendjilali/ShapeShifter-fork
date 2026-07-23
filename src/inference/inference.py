@@ -3,12 +3,17 @@ if True:
     sys.path.append('./src')
 import argparse
 import os
+import sys
 import laspy
 from utils.fvdb_utils import grid_to_VDB
 from utils.diffusion_tensor import DiffusionTensor
 import numpy as np
 import torch
 import time
+
+
+import utils.diffusion_tensor as _diffusion_tensor
+sys.modules.setdefault('diffusion_tensor', _diffusion_tensor)
 
 
 # Level-0 coarse layout — must match configs/training/diffusion_0.yaml and 16.pt
@@ -126,6 +131,7 @@ def compute_all_generations_dales(
     nz=LEVEL0_NZ,
     target_class=None,
     occ_threshold=0.0,
+    upsampler_only_levels=None,
 ):
     """
     Unconditional DALES generation: noise → level 0 → … → level max_level.
@@ -135,8 +141,13 @@ def compute_all_generations_dales(
 
     target_class: int | None — if set, clamp class channels to this label
                   throughout sampling (repaint-style conditioning).
+
+    upsampler_only_levels: iterable[int] | None — for listed levels (>0), use
+                  the upsampler prediction as the main generated output instead
+                  of diffusion refinement.
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    upsampler_only_levels = set(upsampler_only_levels or [])
 
     diffusion0 = load_dales_diffusion(0, src)
     diffusion0.eval()
@@ -168,6 +179,10 @@ def compute_all_generations_dales(
             target_class=target_class,
             occ_threshold=occ_threshold,
         )
+        if i in upsampler_only_levels:
+            if verbose:
+                print(f'LEVEL {i}: using upsampler-only output as main generation')
+            generated_X = upsampled_X
         # move previous level off GPU before accumulating the new one
         generated_Xs[-1] = generated_Xs[-1].cpu()
         upsampler_Xs.append(upsampled_X)
@@ -226,17 +241,18 @@ def export_to_laz(positions, intensity, class_idx, save_path):
 
     las.write(save_path)
 
-def save_dales_pc(generated_X, out_dir, level=0, min_ind=0, stage="D"):
+def save_dales_pc(generated_X, out_dir, level=0, min_ind=0, stage="D", occ_threshold=0.5):
     """
     Export a DALES generation batch as LAZ, coloured by semantic class.
 
     Filenames: ``scene_{outputID}_{stage}_{level}.laz`` where stage is ``D``
     (diffusion) or ``U`` (upsampler).
+
     """
     for ind in range(generated_X.grid_count):
         g = DiffusionTensor(
             generated_X.grid[ind], generated_X.data[ind]
-        ).get_global().remove_mask()
+        ).get_global().remove_mask(threshold=occ_threshold)
 
         positions, features, _ = DiffusionTensor.get_feature_data(g.jdata)
 
@@ -253,10 +269,51 @@ def save_dales_pc(generated_X, out_dir, level=0, min_ind=0, stage="D"):
         export_to_laz(positions_np, intensity, class_idx, save_path=laz_path)
 
 
+def _gt_occupancy_stats(gt_root: str, pyramid_res: int = 16, n_crops: int = 350,
+                         empty_fill: str = 'zero') -> dict:
+    """Scan real encoded crops and return occupancy statistics.
+
+    Loads up to *n_crops* level-0 .pt files from <gt_root>/train/, densifies
+    each with to_custom_dense(empty_fill), and measures the fraction of voxels
+    that have mask > 0 (occupied).
+
+    Returns a dict with keys: n_crops_found, occ_mean, occ_std, occ_min, occ_max.
+    Returns None if no crops are found.
+    """
+    import glob, random as _random
+    pattern = os.path.join(gt_root, 'train', '*', f'{pyramid_res}.pt')
+    files = sorted(glob.glob(pattern))
+    if not files:
+        return None
+    _random.seed(42)
+    sample = _random.sample(files, min(n_crops, len(files)))
+    fracs = []
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    for path in sample:
+        obj = torch.load(path, weights_only=False)
+        if not isinstance(obj, DiffusionTensor):
+            obj = DiffusionTensor(obj.grid, obj.data)
+        obj = DiffusionTensor(obj.grid.to(device), obj.data.to(device))
+        dense = obj.to_custom_dense(empty_fill=empty_fill)
+        mask = dense.jdata[:, -1]
+        fracs.append(float((mask > 0).float().mean()))
+    fracs_t = torch.tensor(fracs)
+    return dict(
+        n_crops_found=len(files),
+        n_crops_sampled=len(fracs),
+        occ_mean=float(fracs_t.mean()),
+        occ_std=float(fracs_t.std()) if len(fracs) > 1 else 0.0,
+        occ_min=float(fracs_t.min()),
+        occ_max=float(fracs_t.max()),
+    )
+
+
 def diagnose_occupancy_dales(
     src, out_dir, nx=LEVEL0_NX, voxel_size=LEVEL0_VOXEL_SIZE, nz=LEVEL0_NZ,
     eval_batch_size=1, features=13,
     ddim_steps=None, thresholds=(-0.5, 0.0, 0.3, 0.6, 0.85),
+    gt_root: str = 'data/dales',
+    pyramid_res: int = LEVEL0_PYRAMID_RES,
 ):
     """Read-only occupancy diagnostic for the level-0 model (review #1).
 
@@ -264,6 +321,9 @@ def diagnose_occupancy_dales(
     distribution of the predicted occupancy over the canonical grid and a
     threshold sweep.  The saved/decoded mask channel is 2σ(logit)-1 ∈ (-1,1),
     so occ_prob = σ(logit) = (mask+1)/2.
+
+    Also compares against real GT crops so you can tell whether the model
+    over- or under-generates occupied voxels.
 
     Reading the result:
       * occ_prob piled up near 1 (logit ≫ 0) everywhere → the field floods to
@@ -318,6 +378,29 @@ def diagnose_occupancy_dales(
     del diffusion0
     torch.cuda.empty_cache()
 
+    # --- ground-truth occupancy comparison ---
+    print("=== ground-truth occupancy comparison ===")
+    gt = _gt_occupancy_stats(gt_root, pyramid_res=pyramid_res)
+    if gt is None:
+        print(f"  [WARNING] No real crops found at {gt_root}/train/*/{pyramid_res}.pt")
+        print("  Pass -gt_root to point to your encoded dataset, or skip comparison.")
+    else:
+        gen_occ = float((mask_val > 0).float().mean())
+        print(f"  Real crops ({gt['n_crops_sampled']}/{gt['n_crops_found']} sampled):")
+        print(f"    occ fraction  mean={gt['occ_mean']:.3f}  std={gt['occ_std']:.3f}  "
+              f"min={gt['occ_min']:.3f}  max={gt['occ_max']:.3f}")
+        print(f"  Generated (this run): occ fraction = {gen_occ:.3f}")
+        ratio = gen_occ / gt['occ_mean'] if gt['occ_mean'] > 0 else float('inf')
+        if ratio > 1.15:
+            print(f"  → model OVER-generates ({ratio:.2f}× real mean) — "
+                  "reduce void_weight or use higher -occ_threshold")
+        elif ratio < 0.85:
+            print(f"  → model UNDER-generates ({ratio:.2f}× real mean) — "
+                  "increase void_weight or lower -occ_threshold")
+        else:
+            print(f"  → occupancy matches real data well ({ratio:.2f}× real mean)")
+    print()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DALES inference')
@@ -347,6 +430,12 @@ if __name__ == '__main__':
                         help='remove_mask threshold in mask-value space (-1..1); raise to prune more')
     parser.add_argument('-diagnose', action='store_true',
                         help='Run the read-only occupancy diagnostic (histogram + threshold sweep) and exit')
+    parser.add_argument('-gt_root', default='data/dales', type=str,
+                        help='Path to encoded GT crops (default: data/dales); used by -diagnose'
+                             ' to compare generated vs real occupancy')
+    parser.add_argument('-upsampler_only_levels', default='', type=str,
+                        help='Comma-separated levels to use upsampler-only output as main generation '
+                            '(example: "1,2").')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -358,10 +447,23 @@ if __name__ == '__main__':
     OUT = args.out or 'output/dales'
     os.makedirs(OUT, exist_ok=True)
 
+    if args.upsampler_only_levels.strip():
+        try:
+            upsampler_only_levels = {
+                int(x.strip()) for x in args.upsampler_only_levels.split(',') if x.strip()
+            }
+        except ValueError as exc:
+            raise ValueError('Invalid -upsampler_only_levels; use comma-separated integers, e.g. "1,2"') from exc
+        if any(lvl <= 0 for lvl in upsampler_only_levels):
+            raise ValueError('-upsampler_only_levels accepts only levels > 0')
+    else:
+        upsampler_only_levels = set()
+
     if args.diagnose:
         diagnose_occupancy_dales(
             src=SRC, out_dir=OUT, nx=args.base_res, voxel_size=args.voxel_size,
-            nz=args.nz, eval_batch_size=1, ddim_steps=args.ddim_steps)
+            nz=args.nz, eval_batch_size=1, ddim_steps=args.ddim_steps,
+            gt_root=args.gt_root)
         sys.exit(0)
 
     n_batches = max(1, args.total_num // args.batch_size)
@@ -383,10 +485,13 @@ if __name__ == '__main__':
                 verbose=True,
                 target_class=args.target_class,
                 occ_threshold=args.occ_threshold,
+                upsampler_only_levels=upsampler_only_levels,
             )
         print(f'  batch {batch_i} done in {time.time()-t0:.1f}s — saving LAZs …')
         for level_i, g in enumerate(GX):
             torch.save(g, os.path.join(OUT, f'gen_{min_ind}_{level_i}.pt'))
-            save_dales_pc(g, OUT, level=level_i, min_ind=min_ind, stage="D")
+            save_dales_pc(g, OUT, level=level_i, min_ind=min_ind, stage="D",
+                          occ_threshold=args.occ_threshold)
         for level_i, u in enumerate(UX, start=1):
-            save_dales_pc(u, OUT, level=level_i, min_ind=min_ind, stage="U")
+            save_dales_pc(u, OUT, level=level_i, min_ind=min_ind, stage="U",
+                          occ_threshold=args.occ_threshold)

@@ -1,4 +1,4 @@
-dales_root: /path/to/dales_2
+dales_root: /data/moussabendjilali/archive/data/dales_2
 gt_root: data/dales
 
 voxel_size_levels:

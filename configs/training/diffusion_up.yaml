@@ -7,10 +7,12 @@ src_path: data/dales
 upsample_fac: 2
 base_resolution: 16
 
-unet_depth: 2
+unet_depth: 1 # lowered at 1 because OOM at level 3 (was 2)
 first_ks: 3
-one_layers: 6
-features: 128
+# one_layers: 6
+one_layers: 2  # lowered at 2 because OOM at level 3
+# features: 128
+features: 64 # lowered at 64 because OOM at level 3
 epochs: 50
 
 n_classes: 8
@@ -19,7 +21,7 @@ n_classes: 8
 class_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 lr: 0.0001
-batch_size: 8
+batch_size: 1
 accumulate_steps: 1
 
 random_crop: false
