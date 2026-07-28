@@ -1,4 +1,6 @@
-# DALES — niveaux 1–4 (upsampling)
+# A5 flood-fix ablation (thesis Ch.4): matches the constant-LR baseline
+# dales_1_08-07-10:06 (no lr_schedule) but with zero_empty_target=false, epochs=25.
+# Single variable = zero_empty_target. See TODO-thesis A5.
 dataset: dales
 manifest_path: configs/dataset/dales.yaml
 src_path: data/dales
@@ -13,7 +15,7 @@ first_ks: 3
 one_layers: 2  # lowered at 2 because OOM at level 3
 # features: 128
 features: 64 # lowered at 64 because OOM at level 3
-epochs: 50
+epochs: 25
 
 n_classes: 8
 # Uniform (see diffusion_0.yaml): inverse-frequency weighting skews the generative
@@ -21,10 +23,6 @@ n_classes: 8
 class_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 lr: 0.0001
-# Cosine LR decay to 0. REQUIRED: constant LR lets weights drift unbounded after
-# the MSE saturates → NaN crash at 50ep. weight_decay ≤0.1 didn't help.
-lr_schedule: cosine
-lr_min: 0.0
 batch_size: 1
 accumulate_steps: 1
 
@@ -35,7 +33,7 @@ empty_fill: zero          # (level 0 only; unused at level>0 — kept for parity
 # target is one-hot void (sum 1).  Without it, fill_upsampled_with_gt leaves
 # trilinear class mass on empties → target sums to 2 → CE optimum P(void)=0.5 →
 # decoded mask≈0 → occupancy floods.
-zero_empty_target: true
+zero_empty_target: false
 
 dropout: 0.05
 time_emb: 128
@@ -45,12 +43,16 @@ coord_features: z
 coord_h_ref: 30.0
 coord_xy_ref: 100.0
 
-# One weighting active (`loss_weighting`); the other's knobs are dead. Here
-# P2-true on the x0 head (SNR·(k+SNR)^−γ). Geometry MSE only (fvdb_diffusion.py).
+# Exactly ONE weighting is active: `loss_weighting` selects it, and the other
+# scheme's knobs are dead.  Here that is P2-true on the x0 head
+# (w = SNR·(k+SNR)^−γ), so p2_k/p2_gamma are live and min_snr_gamma is not —
+# it is left commented out because the two schemes emphasise OPPOSITE ends of
+# the noise range and a reader must not assume both are in effect.
+# It weights the geometry MSE only; see src/utils/fvdb_diffusion.py.
 loss_weighting: p2
 p2_k: 1.0
 p2_gamma: 1.0
-# min_snr_gamma: unused while loss_weighting != min_snr
+# min_snr_gamma: 5.0       # unused while loss_weighting != min_snr
 
 
 # Higher void_weight than level 0 (0.5): level>0 runs on the *subdivided coarse

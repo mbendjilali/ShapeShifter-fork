@@ -20,7 +20,7 @@ unet_depth: 2
 first_ks: 3
 one_layers: 8              # was 6 — more bottleneck layers = better global scene context
 features: 192              # was 128 — more capacity for spatial correlation patterns
-epochs: 200                # was 80 — diffusion models need longer training; structure forms late
+epochs: 80                # was 80 — diffusion models need longer training; structure forms late
 
 n_classes: 8
 # Uniform class weights.  Inverse-frequency weighting (a segmentation habit) makes
@@ -50,11 +50,11 @@ coord_features: z
 coord_h_ref: 30.0
 coord_xy_ref: 100.0
 
-loss_weighting: min_snr    # was p2 — Min-SNR-γ rebalances toward mid-σ where spatial structure forms;
-                           # p2 under-weights those timesteps relative to the extremes
-p2_k: 1.0
-p2_gamma: 1.0
+# One weighting active (`loss_weighting`); the other's knobs are dead. Here
+# Min-SNR-γ. Weights the geometry MSE only (see src/utils/fvdb_diffusion.py).
+loss_weighting: min_snr
 min_snr_gamma: 5.0
+# p2_k / p2_gamma: unused while loss_weighting != p2
 
 # Occupancy via the VOID class.  Occupancy is folded into the semantic
 # categorical: [8 real classes + 1 'void'] form one (n_cls+1)-way softmax, so the

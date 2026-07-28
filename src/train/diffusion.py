@@ -160,7 +160,17 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
         model_upsampler = torch.load(up_ckpt, weights_only=False).to(device)
         model_upsampler.eval()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+    # AdamW: weight_decay=0.0 (default) == plain Adam.
+    weight_decay = cfg.get("weight_decay", 0.0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"],
+                                  weight_decay=weight_decay)
+
+    # Cosine LR decay to 0 curbs late-training weight drift (see WeightL2). Default off.
+    lr_schedule = cfg.get("lr_schedule", "constant")
+    scheduler = None
+    if lr_schedule == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cfg["epochs"], eta_min=cfg.get("lr_min", 0.0))
 
     # ── AMP scaler ───────────────────────────────────────────────────────────
     scaler = torch.amp.GradScaler('cuda')
@@ -222,6 +232,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
             epoch_mse_loss_sum = 0.0
             epoch_bce_loss_sum = 0.0
             epoch_occ_iou_sum = 0.0
+            skipped_steps = 0   # grad-steps with every micro-batch NaN-skipped
             # Diagnostics: occupied-only geometry/class error and per-σ CE/IoU,
             # accumulated per micro-batch (NaN-aware for empty σ buckets).
             n_bins = cfg.get("per_sigma_bins", 5)
@@ -300,15 +311,34 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     scaler.step(optimizer)
                     if ema is not None:
                         ema.update(diffusion)
-                scaler.update()
+                    scaler.update()   # must follow a real step(), else GradScaler asserts
+                else:
+                    skipped_steps += 1
 
                 epoch_mse_loss_sum += step_mse / accumulate_steps
                 epoch_bce_loss_sum += step_bce / accumulate_steps
                 epoch_occ_iou_sum += step_iou / accumulate_steps
 
-            epoch_mse_loss = epoch_mse_loss_sum / grad_steps_per_epoch
-            epoch_bce_loss = epoch_bce_loss_sum / grad_steps_per_epoch
-            epoch_occ_iou  = epoch_occ_iou_sum / grad_steps_per_epoch
+            # divide by contributing steps only (skipped ones added 0)
+            stepped = max(grad_steps_per_epoch - skipped_steps, 1)
+            epoch_mse_loss = epoch_mse_loss_sum / stepped
+            epoch_bce_loss = epoch_bce_loss_sum / stepped
+            epoch_occ_iou  = epoch_occ_iou_sum / stepped
+
+            # weight L2 norm — unbounded growth signals the drift/divergence
+            with torch.no_grad():
+                param_l2 = torch.sqrt(sum((p.detach().float() ** 2).sum()
+                                          for p in model.parameters())).item()
+            if scheduler is not None:
+                scheduler.step()
+            if skipped_steps and is_main:
+                frac = skipped_steps / grad_steps_per_epoch
+                tqdm.write(
+                    f"⚠️  epoch {epoch}: {skipped_steps}/{grad_steps_per_epoch} "
+                    f"grad-steps NaN-skipped ({frac:.0%}) — training is diverging"
+                    + ("; ALL steps skipped, aborting." if frac >= 1.0 else "."))
+                if frac >= 1.0:
+                    break
 
             denom = max(n_micro, 1)
             epoch_occ_only_mse = epoch_occ_only_mse_sum / denom
@@ -321,6 +351,8 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     "Loss/train",
                     {"MSE": epoch_mse_loss, "BCE": epoch_bce_loss,
                      "Total": epoch_mse_loss + epoch_bce_loss}, epoch)
+                writer.add_scalar("WeightL2", param_l2, epoch)
+                writer.add_scalar("LR", optimizer.param_groups[0]["lr"], epoch)
                 # Occupied-only geometry/class error (the aggregate MSE/CE are
                 # dominated by zero-filled empties and read near-zero regardless).
                 writer.add_scalars(
@@ -397,6 +429,7 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
                     f"BCE={epoch_bce_loss:.4f} "
                     f"| OccIoU={epoch_occ_iou:.3f} "
                     f"| OccOnly MSE={epoch_occ_only_mse:.4f}/CE={epoch_occ_only_ce:.3f} "
+                    f"| |W|={param_l2:.1f} "
                     f"| IoU/σ[clean→noisy]={iou_str}"
                     + val_suffix)
 

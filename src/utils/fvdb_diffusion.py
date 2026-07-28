@@ -331,14 +331,16 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
 
         n_cls = self.n_classes
 
-        # --- Geometry MSE (offset+intensity) — optionally Min-SNR-γ / P2 weighted.
-        # The last channel is the void logit (part of the categorical below), so it
-        # is excluded from the Gaussian MSE.
+        # Geometry MSE (channels 0:4 = offset+intensity), optionally Min-SNR-γ / P2
+        # weighted. This weighting scopes to THIS term only; the categorical below
+        # (occupancy + semantics) is unweighted in t — occupancy levers are
+        # void_weight/class_weight/zero_empty_target, not the σ-weighting.
+        # x0-head currency: to realise ε-weight w̃(σ) the x0 multiplier is SNR·w̃, so
+        # P2-true = SNR·(k+SNR)^−γ and Min-SNR = min(SNR,γ). Derivation: docs/advice.md.
         geom_pred   = pred.jdata[:, :4]
         geom_target = X.jdata[:, :4]
         if self.loss_weighting is not None:
-            # The model predicts x_start (x0), so weights are multipliers on the
-            # x0-MSE, mean-normalized so the loss scale (grad-clip / LR) is preserved.
+            # x0-MSE multipliers, mean-normalized to preserve loss scale.
             if self.loss_weighting == 'min_snr':
                 w = snr.clamp(max=self.min_snr_gamma)
             else:  # 'p2' — P2-true on an x0 head: SNR·(k+SNR)^(−γ)
@@ -349,9 +351,9 @@ class SparseDiffusion(nn.Module):  # Inspired by bitfusion by lucidrain
         else:
             mse_loss = F.mse_loss(geom_pred, geom_target)
 
-        # --- Unified (n_cls+1)-way categorical: [class logits, void logit] ---
-        # Occupancy is "not void".  The same softmax reproduces empty (void) and
-        # occupied states at sampling, so the model's empty cue survives.
+        # Unified (n_cls+1)-way categorical [class logits, void logit]; occupancy =
+        # "not void". Unweighted in t (see above); reweighted over classes only, via
+        # class_weight/void_weight.
         occ_target_hard = (X.jdata[:, -1] > 0)
         pred_label   = pred.jdata[:, 4:4 + n_cls]
         target_label = X.jdata[:, 4:4 + n_cls]
