@@ -274,7 +274,41 @@ The failure is memory, not the `scaler.update` NaN crash.
   untrainable: at 97 % occupancy the default allocator fragments and one large
   crop kills it. **Level 3 needs that env var on 11 GB hardware** — this belongs
   in the chapter and in the run instructions, not in a "did not complete" line.
-- *Cost:* **538 s/epoch → ≈7 h 20 for 50 epochs.** Run in progress.
+- *Cost:* 537 s/epoch. **COMPLETE — 50/50 epochs in 7 h 28 (03-08-2026).**
+
+→ **A6 IS ANSWERED. Level 3 trains. Do not write "did not complete".**
+Checkpoints: `dales_3_03-08-08:26_best.pt` (epoch 10, Val 0.1198 = MSE 0.0016 +
+BCE 0.1182) and `dales_3_03-08-08:26.pt` (final, EMA weights). Run
+`diffusion_level_3_03-08-08:26`, 50 epochs, no crash, no NaN-skipped step, no
+divergence warning.
+
+| | first | best | last |
+|---|---|---|---|
+| train BCE | 0.5041 | 0.1709 | 0.1986 |
+| train MSE | 0.0162 | 0.0016 | 0.0017 |
+| Val BCE | 0.7292 | **0.1182** | 0.1827 |
+| Val OccIoU | 0.788 | **0.9137** | 0.8619 |
+| Val OccIoU σ-bin0 | 0.9839 | **1.000** | 1.000 |
+
+- *The A0 fix is independently confirmed at level 3.* `WeightL2` 28.7 → 36.2 with
+  per-epoch increments decaying 0.23 → **0.001** as cosine LR reached exactly 0.
+  Compare A0's constant-LR level-1 failure: 28 → 50+, never plateauing, NaN crash
+  at epoch 46. Same architecture, same optimiser, opposite outcome — the cosine
+  schedule is doing the work, and level 3 is a second, harder confirmation of it.
+- *Bin-0 Val OccIoU reaches 1.000*, i.e. at near-zero σ the model reproduces the
+  level-3 occupancy exactly — the same health signal that Phase 0 of `TODO.md`
+  used to diagnose the flood, now clean at the finest trained level.
+- *Best is epoch 10, and val then drifts up* (0.118 → ~0.18–0.25 → 0.183). With
+  `val_crops=32` the band is noisy rather than monotone overfitting — Val OccIoU
+  recovered from 0.792 to 0.869 after epoch 25 — but `_best.pt` (epoch 10) and
+  the final EMA checkpoint should be compared before either is quoted; the header
+  number favours epoch 10, the EMA weights usually sample better.
+- *Chapter wording:* level 3 (128³, 0.4 m) trains to completion on a single 11 GB
+  2080 Ti in ~7.5 h, given `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+  The 10-07 "one logged point then stop" was **out of memory**, not the A0 NaN
+  crash and not a property of the method. Whether to *use* level 3 in the
+  pyramid is a separate question this run does not settle — no inference or
+  visual check has been run on the checkpoint.
 
 **A0. Level-1 training stability — bug found and fixed (28-07-2026).**
 Discovered while producing a fresh level-1 checkpoint: a 50-epoch retrain
