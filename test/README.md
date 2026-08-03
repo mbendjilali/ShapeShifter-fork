@@ -28,8 +28,11 @@ lives there — scripts never import each other.
 | Script | What it does |
 |---|---|
 | `reconstruct.py` | Noise a real crop to `t`, denoise it back. Sanity check that the denoiser recovers structure. |
-| `class_generation.py` | Generate from pure noise with the class channel clamped. "Does the model know what class-X geometry looks like?" |
+| `class_generation.py` | Generate from pure noise with the class channel clamped. "Does the model know what class-X geometry looks like?" `--clamp_mode hard` overwrites the class channels (also asserts occupancy — the original A3 probe); `renorm` redistributes the model's own class-sum onto the target class, leaving occupancy free. |
+| `a3_layout_generation.py` | **Thesis A3 follow-up.** Fixed class *layout*, free geometry: one GT class per column, clamped via `renorm`; prints per-class height/density adherence vs the same crop's GT. `--reduce majority\|nonground` picks how a column's class is chosen (`majority` counts voxels and favours tall classes; `nonground` labels by what stands on the column). `--layout_mask half\|random` blanks part of the layout — the only way to see what the model hallucinates in unconstrained space, since DALES ground returns leave every real column defined. |
 | `inpaint.py` | Erase a fraction of the crop's X-range, then denoise. "Can it reconstruct information deliberately removed?" |
+| `a1_d1_vs_gt.py` | **Thesis A1.** Level-1 output beside the ground-truth crop of the same tile, same viewpoint. |
+| `a2_d0_layouts.py` | **Thesis A2.** Unconditional level-0 layouts from pure noise on the canonical base grid. |
 
 ### evaluation/ — quantitative, prints tables
 
@@ -37,6 +40,7 @@ lives there — scripts never import each other.
 |---|---|
 | `upsampler_vs_diffusion.py` | Level-N diffusion vs upsampler-alone on occupancy IoU / semantic accuracy over the same fine voxels. Does the refinement earn its cost? |
 | `distribution_stats.py` | Generated class marginal + occupancy fraction vs the training data. Catches class skew and over/under-generation. |
+| `a5_ablation_curves.py` | **Thesis A5.** Training curves of the two level-1 runs that differ only in `zero_empty_target`. Reads TensorBoard, writes the figure — no checkpoint, no GPU. |
 
 ### diagnostics/ — root-cause probes for known bugs
 
