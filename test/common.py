@@ -23,9 +23,14 @@ import torch  # noqa: E402
 from utils.diffusion_tensor import DiffusionTensor  # noqa: E402
 from inference.inference import export_to_laz  # noqa: E402
 
+# Index i == DALES semantic label i+1, because encode_features one-hots `sem − 1`
+# (src/encoding/point_cloud.py). The order is therefore fixed by the `classes`
+# map in configs/dataset/dales.yaml — 5 = PowerLines, 6 = Fences — and must not
+# be reordered here. (Indices 4/5 were swapped until 03-08-2026, which mislabelled
+# every printed table and exported filename for those two classes.)
 CLASS_NAMES = [
     "Ground", "Vegetation", "Cars", "Trucks",
-    "Fences", "PowerLines", "Poles", "Buildings",
+    "PowerLines", "Fences", "Poles", "Buildings",
 ]
 N_CLS = len(CLASS_NAMES)
 

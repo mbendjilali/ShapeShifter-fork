@@ -46,13 +46,23 @@ checked and is a non-issue: `class_generation.py` pruned at 0.5 and
 `a2_d0_layouts.py` at 0.0, but re-running the clamp at 0.0 moves the numbers by
 <0.2 pp — the decoded mask is bimodal, so almost no voxel lies between the two
 cuts. A `--occ_threshold` flag now makes the cut explicit, default 0.0.)
+→ **CLASS LABEL BUG — fixed 03-08-2026, affects everything below.**
+`test/common.py` `CLASS_NAMES` had indices **4 and 5 swapped** relative to
+`configs/dataset/dales.yaml` (sem 5 = PowerLines, 6 = Fences; `encode_features`
+one-hots `sem − 1`). Every printed table, every `.laz` filename and every
+statement of the form "the PowerLines row" produced before that date names
+**Fences**, and vice versa. *Computation was never affected* — `--class_ids` and
+the clamp index the channel directly — so no result needs recomputing, only
+relabelling. `A3_renorm/clamp_class5_PowerLines_renorm.laz` renamed to
+`…_Fences_renorm.laz`. `distribution_stats.py` / `threshold_sweep.py` printed
+the same swap.
 → **What the probe actually shows.** Clamping is *not* inert: median height moves
-in the right semantic order — Ground 4.8 m, PowerLines 8.0 m, Buildings 11.2 m
+in the right semantic order — Ground 4.8 m, **Fences** 8.0 m, Buildings 11.2 m
 (p90: 11.2 / 14.4 / 17.6) — and the unconditional layout matches the Ground
 clamp, as it should for ground-dominated tiles. So class-conditional *height*
-priors exist. What fails is **structure and sparsity**: a powerline scene should
-be thin cables over empty air and instead fills 45 % of the volume like any other
-scene. Write the negative result that way.
+priors exist. What fails is **structure and sparsity**: the clamped scene fills
+~45 % of the volume whatever the class. Write the negative result that way, and
+note that **no powerline clamp was ever run** — class 5 was Fences.
 → **Two caveats the chapter must not step on.** (a) The clamp is *spatially
 uniform* — it asserts "every voxel is class X" over the whole grid. Since
 occupancy is encoded as class-sum 1 in the same (n_cls+1) softmax
@@ -158,6 +168,47 @@ budget) but not joint class–geometry structure; conditioning therefore has to
 enter at training time.* That makes A3 the experiment which motivates the `cond`
 hook and the GVAE interface (X3) rather than a result to apologise for.
 
+→ **Class height census (03-08-2026, all 1000 crops, level 0, CPU only).**
+Height above each crop's median ground voxel, at 3.2 m:
+
+| class | p50 | p90 | p50 (m) | p90 (m) | share |
+|---|---|---|---|---|---|
+| Ground | 0 | 1 | 0.0 | 3.2 | 35.9 % |
+| Vegetation | 3 | 7 | 9.6 | 22.4 | 42.3 % |
+| Buildings | 2 | 3 | 6.4 | 9.6 | 18.1 % |
+| **PowerLines** | **4** | **6** | **12.8** | **19.2** | 1.8 % (406/1000 crops) |
+| **Fences** | **1** | **2** | **3.2** | **6.4** | 0.7 % (779/1000 crops) |
+| Poles | 3 | 5 | 9.6 | 16.0 | 0.3 % |
+| Cars / Trucks | 1 | 1 | 3.2 | 3.2 | 0.7 / 0.2 % |
+
+This settles the quantisation-vs-failure question **without a rerun**:
+PowerLines sit 4–6 voxels clear of the ground and are therefore fully
+resolvable at 3.2 m — flattened cables would be a real failure. Fences sit at
+1–2 voxels, i.e. *at* the quantisation limit — flattened fences are not a
+finding. The two must not share a caption sentence.
+→ **But the structural point supersedes both.** A powerline column is ground at
+0 voxels *and* cable at 4–6 voxels. `a3_layout_generation.py` asserts **one**
+class over every voxel of a column (`col_cls = layout[i,j]`, clamped from
+ground to grid top), so neither reduce rule can express that: `nonground`
+relabels the ground return as PowerLines, `majority` lets the ground-dominated
+column swallow the cable entirely. **A 2D single-class footprint is structurally
+incapable of specifying an aerial LiDAR column**, and the census above turns
+that from an assertion into a measurement. Any flattening seen under this
+conditioning is at least partly the signal's inadequacy, not the model's.
+This is the chapter's hinge: it is the strongest available motivation for a
+*height-aware* conditioning signal, it applies to plan-view/BEV conditioners of
+the Control-3D-Scene kind, and it is the cleanest reason to reach for a 3D
+latent — §4.7 ends "a plan-view signal cannot specify this data", §4.8 opens
+"so we tried to produce a 3D one from a graph". Scope the claim to *single-class*
+plan-view signals: a multi-channel BEV with height bins can express part of it,
+and a reader who works on BEV conditioning will know that.
+→ **Caveat before quoting any powerline result:** neither A3 layout crop
+(`x0000_y0100`, `x0000_y0400`) contains a single PowerLines column, and the
+per-column `max-z` the script prints is over *all* classes in the column, not
+per class — so the existing stdout cannot answer a per-class height question
+even with the labels fixed. A powerline-bearing crop plus a per-class height
+column would be needed; the census above is the cheaper substitute and is
+probably sufficient.
 → **Do not extend A3 before the freeze.** A RePaint-resampling or
 reconstruction-guidance (DPS-style) variant would move the collapse numbers
 somewhat but cannot change the conclusion — trained conditioning would still be
