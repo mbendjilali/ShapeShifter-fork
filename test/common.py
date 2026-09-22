@@ -87,16 +87,27 @@ def level_resolutions(level: int, base_res: int = 16, upsample_fac: int = 2):
     return res1, upsample_fac * res1
 
 
-def load_levelN_inputs(crop_path, res1, res2, upsample_fac, device):
+def load_levelN_inputs(crop_path, res1, res2, upsample_fac, device,
+                       zero_empty_target=False):
     """Reproduce DALESDataset.load_crop_levelN for one crop, no dataset object.
 
     Returns (X, X_UP, X0): the coarse input, its trilinear upsample, and the
     fine ground truth filled onto the upsampled voxel set.
+
+    zero_empty_target mirrors the dataset flag of the same name (dales.py): zero
+    every channel of empty (mask<0) voxels, then restore mask=-1, so the
+    categorical target is one-hot void (row sum 1) instead of carrying the
+    trilinear class leftovers (row sum 2). Pass it to reproduce the *fixed*
+    target semantics; leave False for the pre-fix behaviour.
     """
     X = load_dt(crop_pt(crop_path, res1), device)
     X0_fine = load_dt(crop_pt(crop_path, res2), device)
     X_UP = X.trilinear_upsample(upsample_fac)
     X0 = DiffusionTensor.fill_upsampled_with_gt(X_UP, X0_fine)
+    if zero_empty_target:
+        empty = X0.data.jdata[:, -1] < 0
+        X0.data.jdata[empty] = 0.0
+        X0.data.jdata[empty, -1] = -1.0
     return X, X_UP, X0
 
 

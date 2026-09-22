@@ -90,6 +90,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--level", type=int, default=1, help="Diffusion level (>0).")
+    p.add_argument("--ckpt", default=None,
+                   help="Pin a specific checkpoint instead of resolving the latest "
+                        "in --src. Required when comparing two named runs.")
     p.add_argument("--src", default="checkpoints/diffusion_models/",
                    help="Directory with diffusion checkpoints.")
     p.add_argument("--split", default="test")
@@ -107,8 +110,12 @@ def main():
     device = get_device()
     res1, res2 = level_resolutions(args.level, args.base_res, args.upsample_fac)
 
-    print(f"Loading level-{args.level} diffusion (+ upsampler) from {args.src} …")
-    diff = load_dales_diffusion(args.level, args.src)
+    if args.ckpt:
+        print(f"Loading level-{args.level} diffusion (+ upsampler), pinned: {args.ckpt}")
+        diff = torch.load(args.ckpt, map_location=device, weights_only=False).to(device)
+    else:
+        print(f"Loading level-{args.level} diffusion (+ upsampler) from {args.src} …")
+        diff = load_dales_diffusion(args.level, args.src)
     diff.eval()
     assert diff.model_upsampler is not None, "level-N diffusion has no upsampler loaded."
     print(f"  max_T={diff.max_T}/{diff.timesteps} (t_start={diff.max_T/diff.timesteps:.3f})  "

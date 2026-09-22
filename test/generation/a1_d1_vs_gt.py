@@ -31,9 +31,11 @@ from common import (get_device, resolve_crop_path, crop_pt, load_dt, export_dt,
                     level_resolutions, has_levels)
 from utils.diffusion_tensor import DiffusionTensor
 from utils.helper import reverse_from
+from inference.inference import load_dales_diffusion
 
-CKPT = "checkpoints/diffusion_models/dales_1_08-07-10:06_best.pt"  # verified, by path
-LEVEL = 1
+# Level 1 is the chapter's figure and pins its verified checkpoint by path; other
+# levels resolve the latest *_best.pt unless --ckpt says otherwise.
+CKPT_BY_LEVEL = {1: "checkpoints/diffusion_models/dales_1_08-07-10:06_best.pt"}
 
 
 def export_global(dt, path, prune=True):
@@ -45,9 +47,9 @@ def export_global(dt, path, prune=True):
 
 
 @torch.no_grad()
-def run_crop(diff, crop_id, out_dir, split, base_res, upsample_fac, steps):
+def run_crop(diff, crop_id, out_dir, split, base_res, upsample_fac, steps, level):
     cp = resolve_crop_path(crop_id, split)
-    res1, res2 = level_resolutions(LEVEL, base_res, upsample_fac)  # 16, 32
+    res1, res2 = level_resolutions(level, base_res, upsample_fac)  # level 1: 16, 32
     if not has_levels(cp, res1, res2):
         print(f"  [skip] {crop_id}: missing {res1}.pt or {res2}.pt")
         return
@@ -68,16 +70,20 @@ def run_crop(diff, crop_id, out_dir, split, base_res, upsample_fac, steps):
 
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.join(out_dir, name)
-    export_global(X,       f"{stem}__coarse_D0.laz")
-    export_global(up,      f"{stem}__upsampler.laz")
-    export_global(d,       f"{stem}__gen_D1.laz")
-    export_global(X0_fine, f"{stem}__gt_D1.laz")
+    # `coarse_gt` is the GT pyramid level below, NOT a D0 sample — no diffusion
+    # model is run on it. gen vs gt at level N is the figure.
+    export_global(X,       f"{stem}__coarse_gt_L{level - 1}.laz")
+    export_global(up,      f"{stem}__upsampler_L{level}.laz")
+    export_global(d,       f"{stem}__gen_D{level}.laz")
+    export_global(X0_fine, f"{stem}__gt_L{level}.laz")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--crops", nargs="+", required=True, help="Crop IDs or dirs.")
+    p.add_argument("--level", type=int, default=1, help="Diffusion level (>0).")
+    p.add_argument("--ckpt", default=None, help="Checkpoint path (overrides the default).")
     p.add_argument("--split", default="test")
     p.add_argument("--out", default="output/tests/A1")
     p.add_argument("--base_res", type=int, default=16)
@@ -86,14 +92,20 @@ def main():
     args = p.parse_args()
 
     dev = get_device()
-    print(f"Loading level-{LEVEL} diffusion (+embedded upsampler): {CKPT}")
-    diff = torch.load(CKPT, map_location=dev, weights_only=False).to(dev)
+    ckpt = args.ckpt or CKPT_BY_LEVEL.get(args.level)
+    if ckpt:
+        print(f"Loading level-{args.level} diffusion (+embedded upsampler): {ckpt}")
+        diff = torch.load(ckpt, map_location=dev, weights_only=False).to(dev)
+    else:
+        print(f"Loading level-{args.level} diffusion (latest *_best.pt)")
+        diff = load_dales_diffusion(args.level, "checkpoints/diffusion_models/")
     diff.eval()
     assert diff.model_upsampler is not None, "checkpoint has no embedded upsampler"
     print(f"  n_classes={diff.n_classes} max_T={diff.max_T}/{diff.timesteps}\n")
 
     for c in args.crops:
-        run_crop(diff, c, args.out, args.split, args.base_res, args.upsample_fac, args.steps)
+        run_crop(diff, c, args.out, args.split, args.base_res, args.upsample_fac,
+                 args.steps, args.level)
 
 
 if __name__ == "__main__":

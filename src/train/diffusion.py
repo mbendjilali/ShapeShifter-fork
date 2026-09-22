@@ -101,6 +101,28 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     from dataset.dales import DALESDataset, clip_data_per_element
 
     is_main = (rank == 0)
+
+    # ── Reproducibility ─────────────────────────────────────────────────────
+    # `seed` in the config makes a run repeatable: torch drives init/noise, and
+    # DALESDataset.sample_crop_ids draws crops with the stdlib `random`, so both
+    # need seeding. Offset by rank so DDP ranks don't draw identical batches.
+    # Unset (None) leaves every RNG unseeded — the historical behaviour, and the
+    # reason the pre-08-2026 runs cannot be reproduced exactly.
+    seed = cfg.get("seed", None)
+    if seed is not None:
+        import random as _random
+        seed = int(seed) + rank
+        _random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        try:
+            import numpy as _np
+            _np.random.seed(seed)
+        except ImportError:
+            pass
+        if is_main:
+            print(f"  seed={cfg.get('seed')} (rank offset applied)")
+
     manifest = cfg.get("manifest_path", "configs/dataset/dales.yaml")
     clip_size = cfg.get("clip_size") if args.level == 0 else None
 
@@ -217,7 +239,14 @@ def _train_dales(args, cfg, device='cuda', rank=0, world_size=1):
     # OccIoU and the per-σ IoU, not a separate loss term.
     best_val_loss = float('inf')
     best_epoch = -1
+    # Run identity. Minute resolution alone collides when two runs start in the
+    # same minute (e.g. an ablation pair launched in parallel on two GPUs), and
+    # the second silently overwrites the first's checkpoints *and* shares its
+    # TensorBoard directory. `run_name` in the config disambiguates; without one,
+    # the pid keeps concurrent runs apart.
     current_time = datetime.today().strftime('%d-%m-%H:%M')
+    run_name = cfg.get("run_name", None)
+    current_time = f"{current_time}_{run_name}" if run_name else f"{current_time}_p{os.getpid()}"
 
     writer = SummaryWriter(
         log_dir=f"runs/diffusion_level_{args.level}_{current_time}"

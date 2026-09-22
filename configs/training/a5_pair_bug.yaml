@@ -1,0 +1,77 @@
+# A5 flood-fix ablation, SEEDED MATCHED PAIR (05-08-2026).
+# Arm: zero_empty_target=false. Identical to the other arm in every other value,
+# incl. seed and epochs. Cosine LR (constant LR is unstable at 50ep — see A0).
+# Single variable = zero_empty_target. See TODO-thesis A5.
+dataset: dales
+manifest_path: configs/dataset/dales.yaml
+src_path: data/dales
+
+
+upsample_fac: 2
+base_resolution: 16
+
+unet_depth: 1 # lowered at 1 because OOM at level 3 (was 2)
+first_ks: 3
+# one_layers: 6
+one_layers: 2  # lowered at 2 because OOM at level 3
+# features: 128
+features: 64 # lowered at 64 because OOM at level 3
+epochs: 50
+
+n_classes: 8
+# Uniform (see diffusion_0.yaml): inverse-frequency weighting skews the generative
+# class marginal toward rare classes.
+class_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+lr: 0.0001
+batch_size: 1
+accumulate_steps: 1
+
+random_crop: false
+clip_size: null
+empty_fill: zero          # (level 0 only; unused at level>0 — kept for parity)
+# THE level>0 flood fix: zero empty fine voxels' features so the void-categorical
+# target is one-hot void (sum 1).  Without it, fill_upsampled_with_gt leaves
+# trilinear class mass on empties → target sums to 2 → CE optimum P(void)=0.5 →
+# decoded mask≈0 → occupancy floods.
+zero_empty_target: false
+
+dropout: 0.05
+time_emb: 128
+ema_decay: 0.999
+
+coord_features: z
+coord_h_ref: 30.0
+coord_xy_ref: 100.0
+
+# Exactly ONE weighting is active: `loss_weighting` selects it, and the other
+# scheme's knobs are dead.  Here that is P2-true on the x0 head
+# (w = SNR·(k+SNR)^−γ), so p2_k/p2_gamma are live and min_snr_gamma is not —
+# it is left commented out because the two schemes emphasise OPPOSITE ends of
+# the noise range and a reader must not assume both are in effect.
+# It weights the geometry MSE only; see src/utils/fvdb_diffusion.py.
+loss_weighting: p2
+p2_k: 1.0
+p2_gamma: 1.0
+# min_snr_gamma: 5.0       # unused while loss_weighting != min_snr
+
+
+# Higher void_weight than level 0 (0.5): level>0 runs on the *subdivided coarse
+# grid*, already pruned to the coarse structure, so void is a smaller fraction and
+# the pruning signal is weak.  With void under-weighted the model floods occupancy
+# to solid "lego blocks".  Start at 1.0 and tune with test/distribution_stats.py
+# so the fine occupancy fraction matches the data.
+void_weight: 1.9
+per_sigma_bins: 5
+
+diffusion_timesteps: 1000
+max_T: 300
+save_every: 10
+val_every: 2
+val_crops: 32
+
+# ── Seeded matched pair ──────────────────────────────────────────────
+seed: 1234
+lr_schedule: cosine
+lr_min: 0.0
+run_name: a5bug

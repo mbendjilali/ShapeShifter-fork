@@ -28,16 +28,22 @@ def main():
     p.add_argument("--n_crops", type=int, default=8)
     p.add_argument("--base_res", type=int, default=16)
     p.add_argument("--upsample_fac", type=int, default=2)
+    p.add_argument("--zero_empty_target", action="store_true",
+                   help="Apply the flood fix (dataset flag of the same name) before "
+                        "measuring. Off = pre-fix targets; on = fixed targets. The "
+                        "pair is the A5 ablation's target-side evidence.")
     args = p.parse_args()
     device = get_device()
     res1, res2 = level_resolutions(args.level, args.base_res, args.upsample_fac)
+    print(f"zero_empty_target = {args.zero_empty_target}")
 
     occ_sum = occ_n = emp_sum = emp_n = 0.0
     emp_classmass = 0.0
     for cp in list_crops(args.split, n=args.n_crops):
         if not has_levels(cp, res1, res2):
             continue
-        _, _, X0 = load_levelN_inputs(cp, res1, res2, args.upsample_fac, device)
+        _, _, X0 = load_levelN_inputs(cp, res1, res2, args.upsample_fac, device,
+                                      zero_empty_target=args.zero_empty_target)
         occ = X0.jdata[:, -1] > 0
         class_mass = X0.jdata[:, 4:4 + N_CLS].sum(-1)          # Σ class target
         void_t = (~occ).float()
